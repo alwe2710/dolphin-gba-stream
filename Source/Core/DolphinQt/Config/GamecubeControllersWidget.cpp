@@ -119,7 +119,8 @@ void GamecubeControllersWidget::OnGCTypeChanged(size_t index)
   const SerialInterface::SIDevices si_device =
       FromGCMenuIndex(m_gc_controller_boxes[index]->currentIndex());
   m_gc_buttons[index]->setEnabled(si_device != SerialInterface::SIDEVICE_NONE &&
-                                  si_device != SerialInterface::SIDEVICE_GC_GBA);
+                                  si_device != SerialInterface::SIDEVICE_GC_GBA &&
+                                  si_device != SerialInterface::SIDEVICE_GC_GBA_STREAM);
 }
 
 void GamecubeControllersWidget::OnGCPadConfigure(size_t index)
