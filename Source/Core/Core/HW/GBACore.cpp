@@ -5,6 +5,8 @@
 
 #include "Core/HW/GBACore.h"
 
+#include <cstdio>
+
 #include <mgba-util/vfs.h>
 #include <mgba/core/log.h>
 #include <mgba/core/timing.h>
@@ -477,17 +479,19 @@ static void ReadAudioBufferIntoMixer(mAudioBuffer* audio_buffer, Mixer* mixer,
                                          sample_count * audio_buffer->channels),
                     audio_buffer->channels);
 
-    // TEMPORARY diagnostic: throttled so it doesn't flood the log, but should
-    // make it obvious from Dolphin's Log Viewer (enable "Serial Interface" at
-    // Notice level) whether audio is actually being forwarded to a stream
-    // client or falling back to the local mixer, and whether both somehow
-    // happen for the same chunk.
+    // TEMPORARY diagnostic: throttled so it doesn't flood the output, printed
+    // straight to stderr (visible when Dolphin is launched from a terminal)
+    // instead of going through Dolphin's Log Viewer, which needs several
+    // dock widgets and checkboxes enabled first. Should make it obvious
+    // whether audio is actually being forwarded to a stream client or
+    // falling back to the local mixer, and whether both somehow happen for
+    // the same chunk.
     static int s_log_throttle = 0;
     if (++s_log_throttle % 100 == 1)
     {
-      NOTICE_LOG_FMT(SERIALINTERFACE,
-                     "GBA{} audio: host={} forwarded={} -> {}", device_number + 1,
-                     host != nullptr, forwarded, forwarded ? "client" : "local mixer");
+      std::fprintf(stderr, "[GBASTREAM-DEBUG] GBA%d audio: host=%d forwarded=%d -> %s\n",
+                   static_cast<int>(device_number) + 1, host != nullptr, forwarded,
+                   forwarded ? "client" : "local mixer");
     }
 
     if (!forwarded)
