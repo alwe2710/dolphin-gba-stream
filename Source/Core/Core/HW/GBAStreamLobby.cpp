@@ -35,7 +35,14 @@ public:
   void Start()
   {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_ref_count++ > 0)
+    ++m_ref_count;
+    // Separate from the refcount check: if an earlier AddRef's listen() call
+    // failed (e.g. the port was transiently still held by a just-exited
+    // previous Dolphin process), every later AddRef used to see refcount > 0
+    // and assume the lobby was already up, silently leaving it dead for the
+    // rest of the session. Retrying here instead means the *next* GBA slot
+    // to start gets another chance once the transient conflict has cleared.
+    if (m_running)
       return;
 
     m_stop = false;
@@ -45,6 +52,7 @@ public:
       ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamLobby: failed to listen on port {}", kLobbyPort);
       return;
     }
+    m_running = true;
     m_thread = std::thread([this] { AcceptLoop(); });
   }
 
@@ -54,6 +62,9 @@ public:
     if (--m_ref_count > 0)
       return;
 
+    if (!m_running)
+      return;
+    m_running = false;
     m_stop = true;
     m_listener.close();
     if (m_thread.joinable())
@@ -109,6 +120,7 @@ private:
 
   std::mutex m_mutex;
   int m_ref_count = 0;
+  bool m_running = false;
   sf::TcpListener m_listener;
   std::thread m_thread;
   std::atomic_bool m_stop{false};
