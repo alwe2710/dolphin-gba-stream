@@ -39,6 +39,8 @@ public:
 
   void GameChanged() override;
   void FrameEnded(std::span<const u32> video_buffer) override;
+  void AudioRateChanged(u32 sample_rate) override;
+  bool ForwardAudioSamples(std::span<const s16> samples, u32 channels) override;
 
 private:
   void AcceptLoop();
@@ -47,6 +49,7 @@ private:
   void RunWebSocketSession(sf::TcpSocket& socket);
   void SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
                                std::vector<u8>* previous_rgb565);
+  void SendAudioIfPending(sf::TcpSocket& socket);
 
   void AttachInputOverride();
   void DetachInputOverride();
@@ -72,6 +75,16 @@ private:
   // emulation thread via GBAPad::GetInput()). Bit layout documented in the .cpp.
   std::atomic<u16> m_remote_keys{0};
   std::atomic_bool m_client_connected{false};
+
+  // PCM audio handed off from the GBA core thread (ForwardAudioSamples) to the
+  // connection-serving thread. Unlike video this is a queue, not a single
+  // slot: dropping stale audio would be audible as glitches, so every sample
+  // must eventually be sent (bounded by RunWebSocketSession's ~4ms poll,
+  // comfortably faster than mGBA's audio buffer callback interval).
+  std::mutex m_audio_mutex;
+  std::vector<s16> m_pending_audio;
+  u32 m_audio_channels = 2;
+  std::atomic<u32> m_audio_sample_rate{32768};
 };
 
 }  // namespace HW::GBA

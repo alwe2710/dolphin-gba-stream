@@ -8,12 +8,14 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include <zlib.h>
@@ -47,6 +49,7 @@ constexpr u16 GBA_STREAM_BASE_PORT = 6800;
 
 constexpr u8 kMsgTypeVideoFrame = 0x01;
 constexpr u8 kMsgTypeInput = 0x02;
+constexpr u8 kMsgTypeAudio = 0x03;
 
 // Remote key bitmask layout (client->server). Chosen to mirror the bit order
 // SI_DeviceGBAEmu::GetData() already uses for the internal GBA keypad word,
@@ -155,7 +158,39 @@ std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
   return frame;
 }
 
-bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payload)
+// Sends `size` bytes on a non-blocking socket, retrying on NotReady. Bounds
+// every wait to a short sleep so a stalled/frozen peer (e.g. a crashed
+// browser tab that stops draining its receive buffer) can never block this
+// thread forever -- `stop_flag` is checked on every retry so shutdown always
+// completes promptly regardless of what the remote end is doing.
+bool SendAllBytes(sf::TcpSocket& socket, const void* data, size_t size,
+                  const std::atomic_bool& stop_flag)
+{
+  const auto* bytes = static_cast<const u8*>(data);
+  size_t sent_total = 0;
+  while (sent_total < size)
+  {
+    if (stop_flag)
+      return false;
+    size_t sent = 0;
+    const auto status = socket.send(bytes + sent_total, size - sent_total, sent);
+    if (status == sf::Socket::Status::Done || status == sf::Socket::Status::Partial)
+    {
+      sent_total += sent;
+      continue;
+    }
+    if (status == sf::Socket::Status::NotReady)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payload,
+                              const std::atomic_bool& stop_flag)
 {
   std::vector<u8> frame;
   frame.reserve(payload.size() + 10);
@@ -180,17 +215,7 @@ bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payl
   }
   frame.insert(frame.end(), payload.begin(), payload.end());
 
-  size_t sent_total = 0;
-  while (sent_total < frame.size())
-  {
-    size_t sent = 0;
-    const auto status =
-        socket.send(frame.data() + sent_total, frame.size() - sent_total, sent);
-    if (status != sf::Socket::Status::Done && status != sf::Socket::Status::Partial)
-      return false;
-    sent_total += sent;
-  }
-  return true;
+  return SendAllBytes(socket, frame.data(), frame.size(), stop_flag);
 }
 
 // Single-page client. Landing view is a P1-P4 lobby: for each of the four
@@ -300,6 +325,33 @@ const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 let imageData = ctx.createImageData(240, 160);
 
+// Created here (inside the P-button's click handler call chain) so the
+// browser's autoplay policy -- which requires audio to start from a user
+// gesture -- is satisfied without any extra "click to enable sound" step.
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let nextAudioTime = 0;
+
+function playAudioChunk(sampleRate, channels, view, byteOffset, sampleCount) {
+  const frameCount = sampleCount / channels;
+  if (frameCount <= 0) return;
+  const buffer = audioCtx.createBuffer(channels, frameCount, sampleRate);
+  for (let ch = 0; ch < channels; ch++) {
+    const channelData = buffer.getChannelData(ch);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = view.getInt16(byteOffset + (i * channels + ch) * 2, true) / 32768;
+    }
+  }
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+  const now = audioCtx.currentTime;
+  // Small safety cushion, and resync if playback ever falls behind real time
+  // (e.g. after a stall) instead of trying to catch up by queueing forever.
+  if (nextAudioTime < now + 0.05) nextAudioTime = now + 0.05;
+  source.start(nextAudioTime);
+  nextAudioTime += buffer.duration;
+}
+
 const ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
 ws.binaryType = 'arraybuffer';
 ws.onopen = () => statusEl.textContent = 'connected';
@@ -308,7 +360,15 @@ ws.onerror = () => statusEl.textContent = 'error';
 
 ws.onmessage = async (ev) => {
   const view = new DataView(ev.data);
-  if (view.getUint8(0) !== 1) return;
+  const type = view.getUint8(0);
+  if (type === 3) {
+    const sampleRate = view.getUint32(1, true);
+    const channels = view.getUint8(5);
+    const sampleCount = (ev.data.byteLength - 6) / 2;
+    playAudioChunk(sampleRate, channels, view, 6, sampleCount);
+    return;
+  }
+  if (type !== 1) return;
   const width = view.getUint32(1, true);
   const height = view.getUint32(5, true);
   const compressed = ev.data.slice(9);
@@ -418,8 +478,19 @@ void GBAStreamHost::FrameEnded(std::span<const u32> video_buffer)
 
 void GBAStreamHost::AcceptLoop()
 {
+  // A plain blocking m_listener.accept() would only return once a connection
+  // arrives; closing the listener from the destructor's thread while this
+  // thread is parked inside accept() is not guaranteed to unblock it on
+  // Linux, which previously made the destructor's join() -- and therefore
+  // stopping emulation -- hang whenever no client was currently connected.
+  // Polling through a selector instead bounds every iteration to 100ms so
+  // m_stop is always checked promptly.
+  sf::SocketSelector selector;
+  selector.add(m_listener);
   while (!m_stop)
   {
+    if (!selector.wait(sf::milliseconds(100)))
+      continue;
     sf::TcpSocket socket;
     if (m_listener.accept(socket) != sf::Socket::Status::Done)
       continue;
@@ -429,6 +500,12 @@ void GBAStreamHost::AcceptLoop()
 
 void GBAStreamHost::ServeConnection(sf::TcpSocket& socket)
 {
+  // Non-blocking for the connection's whole lifetime: every read/send below is
+  // written to tolerate NotReady and re-check m_stop, so a stalled peer (dead
+  // network, frozen tab) can never block this thread -- and therefore never
+  // block stopping emulation -- indefinitely.
+  socket.setBlocking(false);
+
   bool is_websocket = false;
   if (!PerformHandshake(socket, &is_websocket) || !is_websocket)
     return;
@@ -446,8 +523,15 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
   std::array<char, 4096> buf{};
   while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384)
   {
+    if (m_stop)
+      return false;
     size_t received = 0;
     const auto status = socket.receive(buf.data(), buf.size(), received);
+    if (status == sf::Socket::Status::NotReady)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      continue;
+    }
     if (status != sf::Socket::Status::Done || received == 0)
       return false;
     request.append(buf.data(), received);
@@ -507,9 +591,7 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
              << "Connection: close\r\n\r\n"
              << body;
     const std::string response_str = response.str();
-    std::size_t sent = 0;
-    [[maybe_unused]] const auto send_status =
-        socket.send(response_str.data(), response_str.size(), sent);
+    SendAllBytes(socket, response_str.data(), response_str.size(), m_stop);
     return true;
   }
 
@@ -522,9 +604,7 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
              << "Connection: close\r\n\r\n"
              << kClientHtml;
     const std::string response_str = response.str();
-    std::size_t sent = 0;
-    [[maybe_unused]] const auto send_status =
-        socket.send(response_str.data(), response_str.size(), sent);
+    SendAllBytes(socket, response_str.data(), response_str.size(), m_stop);
     return true;
   }
 
@@ -542,7 +622,7 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
            << "Sec-WebSocket-Accept: " << std::string(reinterpret_cast<char*>(b64.data()), b64_len)
            << "\r\n\r\n";
   const std::string response_str = response.str();
-  if (socket.send(response_str.data(), response_str.size()) != sf::Socket::Status::Done)
+  if (!SendAllBytes(socket, response_str.data(), response_str.size(), m_stop))
     return false;
 
   *is_websocket = true;
@@ -560,6 +640,10 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
   std::vector<u8> previous_rgb565;
 
   m_remote_keys = 0;
+  {
+    std::lock_guard<std::mutex> lock(m_audio_mutex);
+    m_pending_audio.clear();
+  }
   m_client_connected = true;
 
   while (!m_stop)
@@ -603,6 +687,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
     }
 
     SendVideoFrameIfPending(socket, &last_sent_frame_id, &previous_rgb565);
+    SendAudioIfPending(socket);
   }
 
   m_client_connected = false;
@@ -653,8 +738,50 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
   AppendU32LE(&message, height);
   message.insert(message.end(), compressed.begin(), compressed.end());
 
-  if (SendWebSocketBinaryFrame(socket, message))
+  if (SendWebSocketBinaryFrame(socket, message, m_stop))
     *previous_rgb565 = std::move(rgb565);
+}
+
+void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& socket)
+{
+  std::vector<s16> samples;
+  u32 channels;
+  {
+    std::lock_guard<std::mutex> lock(m_audio_mutex);
+    if (m_pending_audio.empty())
+      return;
+    samples = std::move(m_pending_audio);
+    m_pending_audio.clear();
+    channels = m_audio_channels;
+  }
+
+  std::vector<u8> message;
+  message.reserve(6 + samples.size() * 2);
+  message.push_back(kMsgTypeAudio);
+  AppendU32LE(&message, m_audio_sample_rate.load());
+  message.push_back(static_cast<u8>(channels));
+  for (const s16 sample : samples)
+  {
+    message.push_back(static_cast<u8>(sample & 0xFF));
+    message.push_back(static_cast<u8>((sample >> 8) & 0xFF));
+  }
+  SendWebSocketBinaryFrame(socket, message, m_stop);
+}
+
+void GBAStreamHost::AudioRateChanged(u32 sample_rate)
+{
+  m_audio_sample_rate.store(sample_rate);
+}
+
+bool GBAStreamHost::ForwardAudioSamples(std::span<const s16> samples, u32 channels)
+{
+  if (!m_client_connected)
+    return false;  // No client listening right now -- fall back to local speakers.
+
+  std::lock_guard<std::mutex> lock(m_audio_mutex);
+  m_pending_audio.insert(m_pending_audio.end(), samples.begin(), samples.end());
+  m_audio_channels = channels;
+  return true;
 }
 
 void GBAStreamHost::AttachInputOverride()

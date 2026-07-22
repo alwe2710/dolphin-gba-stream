@@ -462,7 +462,7 @@ void Core::AddCallbacks()
 }
 
 static void ReadAudioBufferIntoMixer(mAudioBuffer* audio_buffer, Mixer* mixer,
-                                     std::size_t device_number)
+                                     std::size_t device_number, GBAHostInterface* host)
 {
   std::array<s16, AUDIO_BUFFER_SIZE> sample_buffer;
   const auto read_size = sample_buffer.size() / audio_buffer->channels;
@@ -471,7 +471,13 @@ static void ReadAudioBufferIntoMixer(mAudioBuffer* audio_buffer, Mixer* mixer,
     const auto sample_count = mAudioBufferRead(audio_buffer, sample_buffer.data(), read_size);
     if (sample_count == 0)
       break;
-    mixer->PushGBASamples(device_number, sample_buffer.data(), sample_count);
+    const bool forwarded =
+        host && host->ForwardAudioSamples(
+                    std::span<const s16>(sample_buffer.data(),
+                                         sample_count * audio_buffer->channels),
+                    audio_buffer->channels);
+    if (!forwarded)
+      mixer->PushGBASamples(device_number, sample_buffer.data(), sample_count);
   }
 }
 
@@ -490,12 +496,17 @@ void Core::SetAVStream()
     auto* const av_stream = static_cast<AVStream*>(stream);
     auto* const core = av_stream->core;
     auto* const audio_buffer = core->GetAudioBuffer();
-    ReadAudioBufferIntoMixer(audio_buffer, av_stream->mixer, av_stream->core->m_device_number);
+    const auto host = core->m_host.lock();
+    if (host)
+      host->AudioRateChanged(rate);
+    ReadAudioBufferIntoMixer(audio_buffer, av_stream->mixer, core->m_device_number, host.get());
     av_stream->mixer->SetGBAInputSampleRate(core->m_device_number, rate);
   };
   m_stream.postAudioBuffer = [](mAVStream* stream, mAudioBuffer* audio_buffer) {
     auto* const av_stream = static_cast<AVStream*>(stream);
-    ReadAudioBufferIntoMixer(audio_buffer, av_stream->mixer, av_stream->core->m_device_number);
+    const auto host = av_stream->core->m_host.lock();
+    ReadAudioBufferIntoMixer(audio_buffer, av_stream->mixer, av_stream->core->m_device_number,
+                            host.get());
   };
 
   m_core->setAVStream(m_core, &m_stream);

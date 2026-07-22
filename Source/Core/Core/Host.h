@@ -38,6 +38,18 @@ public:
   virtual ~GBAHostInterface() = default;
   virtual void GameChanged() = 0;
   virtual void FrameEnded(std::span<const u32> video_buffer) = 0;
+
+  // Optional audio hooks, both no-ops by default so existing hosts (the Qt
+  // widget, Android, headless tools) are unaffected. A host that overrides
+  // ForwardAudioSamples() to return true for a given call takes ownership of
+  // those samples instead of having them mixed into the local audio output --
+  // used by GBAStreamHost to redirect a GBA's audio to its remote client
+  // instead of the host machine's speakers.
+  virtual void AudioRateChanged(u32 sample_rate) {}
+  virtual bool ForwardAudioSamples(std::span<const s16> samples, u32 channels)
+  {
+    return false;
+  }
 };
 
 enum class HostMessageID
