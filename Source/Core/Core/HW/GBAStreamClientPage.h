@@ -76,13 +76,17 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   .tbtn.big{width:64px;height:64px;font-size:20px}
   .tbtn.small{width:48px;height:32px;font-size:11px;border-radius:6px}
 
-  #menuButton{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  #menuButton{display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);
               width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,0.45);
               color:#fff;border:1px solid rgba(255,255,255,0.5);font-size:20px;
-              line-height:44px;padding:0;z-index:20}
+              padding:0;z-index:20;align-items:center;justify-content:center}
+  /* justify-content:flex-start (not center) so a panel taller than the
+     viewport in landscape scrolls from the top instead of centering and
+     clipping its first item above the visible area. */
   #menuPanel{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.9);color:#fff;
-             z-index:30;flex-direction:column;align-items:center;justify-content:center;
-             gap:8px;padding:16px;box-sizing:border-box;overflow:auto;text-align:center}
+             z-index:30;flex-direction:column;align-items:center;justify-content:flex-start;
+             gap:8px;padding:16px;padding-top:max(16px, env(safe-area-inset-top));
+             box-sizing:border-box;overflow-y:auto;text-align:center}
   #menuPanel button{margin:2px;min-width:100px}
   #gamepadBindingsList{display:flex;flex-direction:column;gap:4px;margin:8px 0}
 </style></head>
