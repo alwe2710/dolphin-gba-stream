@@ -68,13 +68,18 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   #touchRight{position:absolute;right:20px;bottom:24px;
               display:flex;flex-direction:column;align-items:flex-end;gap:12px}
   #touchStartSelect{display:flex;gap:8px}
-  #touchAB{display:flex;gap:12px}
+  /* A (last child) sits higher than B, like the real GBA's staggered layout. */
+  #touchAB{display:flex;align-items:flex-end;gap:8px}
+  #touchAB button:last-child{margin-bottom:20px}
   .tbtn{font-size:16px;border-radius:8px;border:1px solid rgba(255,255,255,0.5);
         background:rgba(255,255,255,0.15);color:#fff;user-select:none;
         -webkit-user-select:none;touch-action:none;pointer-events:auto}
   .tbtn.round{border-radius:50%;width:52px;height:52px}
   .tbtn.big{width:64px;height:64px;font-size:20px}
   .tbtn.small{width:48px;height:32px;font-size:11px;border-radius:6px}
+  /* Darkened while held, so a press is visually obvious with no haptic
+     feedback to rely on. */
+  .tbtn.pressed{background:rgba(0,0,0,0.55)}
 
   #menuButton{display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);
               width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,0.45);
@@ -362,8 +367,16 @@ if (isMobile) {
 
   touchControlsEl.querySelectorAll('.tbtn').forEach((btn) => {
     const bit = nameToBit[btn.dataset.name];
-    const press = (e) => { e.preventDefault(); if (!(keyState & bit)) { keyState |= bit; sendKeys(); } };
-    const release = (e) => { e.preventDefault(); if (keyState & bit) { keyState &= ~bit; sendKeys(); } };
+    const press = (e) => {
+      e.preventDefault();
+      btn.classList.add('pressed');
+      if (!(keyState & bit)) { keyState |= bit; sendKeys(); }
+    };
+    const release = (e) => {
+      e.preventDefault();
+      btn.classList.remove('pressed');
+      if (keyState & bit) { keyState &= ~bit; sendKeys(); }
+    };
     btn.addEventListener('touchstart', press, {passive: false});
     btn.addEventListener('touchend', release, {passive: false});
     btn.addEventListener('touchcancel', release, {passive: false});
