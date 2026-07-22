@@ -193,10 +193,17 @@ bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payl
   return true;
 }
 
-// Single-page client: canvas + WebSocket, decodes raw-deflate RGB565 frames
-// and sends a 3-byte input message whenever the locally-held button state
-// changes. Served directly over plain HTTP GET from the same port as the
-// WebSocket endpoint, so no separate web server/hosting is needed.
+// Single-page client. Landing view is a P1-P4 lobby: for each of the four
+// possible GC ports it probes http://<host>:(6800+n)/status (see the
+// "/status" branch in PerformHandshake) to find out which ports currently
+// have a GBAStreamHost running at all (i.e. are configured as GBA
+// (Client-Stream)) and whether each is already occupied by another client,
+// then shows a picker with unavailable slots grayed out. Picking a slot opens
+// a WebSocket to that port and switches to the canvas+input view, which
+// decodes raw-deflate RGB565 frames and sends a 3-byte input message whenever
+// the locally-held button state changes. Served directly over plain HTTP GET
+// from the same port as the WebSocket endpoint, so no separate web
+// server/hosting is needed.
 constexpr std::string_view kClientHtml = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><title>Dolphin GBA Stream</title>
 <style>
@@ -206,12 +213,70 @@ constexpr std::string_view kClientHtml = R"HTML(<!doctype html>
   #status{margin:8px;font-size:14px}
   #settings{margin-top:8px;font-size:13px}
   #settings button{margin:2px;min-width:80px}
+  #game{display:none;flex-direction:column;align-items:center}
+  #lobbyButtons{display:flex;gap:10px;margin-top:12px}
+  #lobbyButtons button{font-size:20px;min-width:64px;min-height:64px;cursor:pointer}
+  #lobbyButtons button:disabled{opacity:0.35;cursor:not-allowed}
 </style></head>
 <body>
+<div id="lobby">
+  <div id="lobbyStatus">Suche nach aktiven GBA-Slots...</div>
+  <div id="lobbyButtons"></div>
+</div>
+<div id="game">
 <div id="status">connecting...</div>
 <canvas id="screen" width="240" height="160"></canvas>
 <div id="settings"></div>
+</div>
 <script>
+const BASE_PORT = 6800;
+const lobbyEl = document.getElementById('lobby');
+const lobbyStatusEl = document.getElementById('lobbyStatus');
+const lobbyButtonsEl = document.getElementById('lobbyButtons');
+const gameEl = document.getElementById('game');
+
+async function checkSlot(n) {
+  const port = BASE_PORT + n;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 800);
+  try {
+    const res = await fetch('http://' + location.hostname + ':' + port + '/status',
+                            {signal: controller.signal});
+    if (!res.ok) return {exists: false};
+    const data = await res.json();
+    return {exists: true, occupied: !!data.occupied};
+  } catch (e) {
+    return {exists: false};
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function buildLobby() {
+  const results = await Promise.all([0, 1, 2, 3].map(checkSlot));
+  lobbyButtonsEl.innerHTML = '';
+  let anyExists = false;
+  results.forEach((r, i) => {
+    if (!r.exists) return;
+    anyExists = true;
+    const btn = document.createElement('button');
+    btn.textContent = 'P' + (i + 1);
+    btn.disabled = r.occupied;
+    btn.title = r.occupied ? 'Bereits verbunden' : 'Verbinden';
+    btn.onclick = () => {
+      lobbyEl.style.display = 'none';
+      gameEl.style.display = 'flex';
+      startStream(BASE_PORT + i);
+    };
+    lobbyButtonsEl.appendChild(btn);
+  });
+  lobbyStatusEl.textContent = anyExists ?
+      'Spieler wählen:' :
+      'Kein GameCube-Port ist aktuell auf "GBA (Client-Stream)" gestellt.';
+}
+buildLobby();
+
+function startStream(port) {
 const BUTTONS = [
   ['A', 1<<0, 'KeyX'], ['B', 1<<1, 'KeyZ'], ['Select', 1<<2, 'ShiftRight'],
   ['Start', 1<<3, 'Enter'], ['Right', 1<<4, 'ArrowRight'], ['Left', 1<<5, 'ArrowLeft'],
@@ -235,7 +300,7 @@ const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 let imageData = ctx.createImageData(240, 160);
 
-const ws = new WebSocket('ws://' + location.host + '/');
+const ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
 ws.binaryType = 'arraybuffer';
 ws.onopen = () => statusEl.textContent = 'connected';
 ws.onclose = () => statusEl.textContent = 'disconnected';
@@ -308,6 +373,7 @@ function renderSettings() {
   }
 }
 renderSettings();
+}  // startStream
 </script>
 </body></html>
 )HTML";
@@ -389,11 +455,20 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
   if (request.find("\r\n\r\n") == std::string::npos)
     return false;
 
+  std::string path;
   std::map<std::string, std::string> headers;
   {
     std::istringstream stream(request);
+    std::string request_line;
+    std::getline(stream, request_line);
+    {
+      const auto first_space = request_line.find(' ');
+      const auto second_space =
+          first_space == std::string::npos ? std::string::npos : request_line.find(' ', first_space + 1);
+      if (first_space != std::string::npos && second_space != std::string::npos)
+        path = request_line.substr(first_space + 1, second_space - first_space - 1);
+    }
     std::string line;
-    std::getline(stream, line);  // request line, not needed
     while (std::getline(stream, line) && line != "\r" && !line.empty())
     {
       const auto colon = line.find(':');
@@ -414,6 +489,29 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
   std::string upgrade = headers.count("upgrade") ? headers["upgrade"] : "";
   std::transform(upgrade.begin(), upgrade.end(), upgrade.begin(),
                  [](unsigned char c) { return std::tolower(c); });
+
+  if (path == "/status")
+  {
+    // Queried cross-port by the lobby screen (see kClientHtml) to find out which
+    // GC ports are currently configured as GBA (Client-Stream) and whether each
+    // one already has a client attached, so it can show a P1-P4 picker with
+    // taken slots grayed out. CORS is required since the lobby page is loaded
+    // from one port but fetch()es the status of the other three.
+    const std::string body =
+        std::string("{\"occupied\":") + (m_client_connected ? "true" : "false") + "}";
+    std::ostringstream response;
+    response << "HTTP/1.1 200 OK\r\n"
+             << "Content-Type: application/json\r\n"
+             << "Access-Control-Allow-Origin: *\r\n"
+             << "Content-Length: " << body.size() << "\r\n"
+             << "Connection: close\r\n\r\n"
+             << body;
+    const std::string response_str = response.str();
+    std::size_t sent = 0;
+    [[maybe_unused]] const auto send_status =
+        socket.send(response_str.data(), response_str.size(), sent);
+    return true;
+  }
 
   if (upgrade != "websocket" || !headers.count("sec-websocket-key"))
   {
