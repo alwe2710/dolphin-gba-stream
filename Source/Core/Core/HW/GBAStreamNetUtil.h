@@ -16,6 +16,14 @@
 
 namespace HW::GBA
 {
+// Fixed ports for the GBA (Client-Stream) feature: one always-on lobby
+// (GBAStreamLobby) plus one player port per GC port configured as GBA
+// (Client-Stream) (GBAStreamHost, device_number 0-3 -> base port +
+// device_number). Shared so GBAStreamHost::CheckPortsInUse() can pre-flight
+// exactly the same addresses the real servers will later try to bind.
+constexpr unsigned short kGBAStreamLobbyPort = 6800;
+constexpr unsigned short kGBAStreamPlayerBasePort = 6801;
+
 // Sends `size` bytes on a non-blocking socket, retrying on NotReady. Bounds
 // every wait to a short sleep so a stalled/frozen peer (e.g. a crashed
 // browser tab that stops draining its receive buffer) can never block this

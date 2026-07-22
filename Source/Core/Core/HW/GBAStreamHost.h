@@ -41,6 +41,16 @@ public:
   GBAStreamHost& operator=(const GBAStreamHost&) = delete;
   ~GBAStreamHost() override;
 
+  // Pre-flight check for the frontend to call before booting: for every GC
+  // port currently configured as GBA (Client-Stream), probes whether its
+  // player port (and the lobby port, if any such port exists at all) can
+  // actually be bound, without constructing any real server yet. Returns the
+  // list of ports that are already taken by something else (empty if
+  // everything the boot will need is free). Exists so a busy port produces a
+  // clear "can't start" message instead of a GBA slot silently booting with
+  // no working stream.
+  static std::vector<int> CheckPortsInUse();
+
   void GameChanged() override;
   void FrameEnded(std::span<const u32> video_buffer) override;
   void AudioRateChanged(u32 sample_rate) override;

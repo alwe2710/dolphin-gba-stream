@@ -54,6 +54,7 @@
 #include "Core/FreeLookManager.h"
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/GBAPad.h"
+#include "Core/HW/GBAStreamHost.h"
 #include "Core/HW/GCKeyboard.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/ProcessorInterface.h"
@@ -1213,6 +1214,28 @@ void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
     m_pending_boot = std::move(parameters);
     return;
   }
+
+#ifdef HAS_LIBMGBA
+  // Refuse to boot rather than silently start a GBA (Client-Stream) port
+  // whose network ports turn out to already be taken by something else --
+  // that used to fail invisibly deep inside GBAStreamHost/GBAStreamLobby
+  // with only a log line nobody would see, leaving the player thinking the
+  // feature was just broken.
+  const std::vector<int> busy_gba_stream_ports = HW::GBA::GBAStreamHost::CheckPortsInUse();
+  if (!busy_gba_stream_ports.empty())
+  {
+    QStringList port_list;
+    for (const int port : busy_gba_stream_ports)
+      port_list << QString::number(port);
+    ModalMessageBox::critical(
+        this, tr("Error"),
+        tr("Cannot start: GBA (Client-Stream) needs port(s) %1, but they are already in "
+           "use by another program (or another running Dolphin instance). Close whatever "
+           "is using them and try again.")
+            .arg(port_list.join(QStringLiteral(", "))));
+    return;
+  }
+#endif
 
   // We need the render widget before booting.
   ShowRenderWidget();

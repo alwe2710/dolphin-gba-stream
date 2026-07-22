@@ -29,10 +29,12 @@
 #include "Common/Crypto/SHA1.h"
 #include "Common/Logging/Log.h"
 
+#include "Core/Config/MainSettings.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GBAPadEmu.h"
 #include "Core/HW/GBAStreamLobby.h"
 #include "Core/HW/GBAStreamNetUtil.h"
+#include "Core/HW/SI/SI_Device.h"
 
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 #include "InputCommon/InputConfig.h"
@@ -46,10 +48,6 @@ namespace
 // HSP slot uses a different code path entirely and never constructs this class.
 constexpr u32 GBA_STREAM_WIDTH = 240;
 constexpr u32 GBA_STREAM_HEIGHT = 160;
-
-// Player ports start one above the lobby's fixed port (see GBAStreamLobby),
-// so the lobby URL never collides with a stream port.
-constexpr u16 GBA_STREAM_BASE_PORT = 6801;
 
 constexpr u8 kMsgTypeVideoFrame = 0x01;
 constexpr u8 kMsgTypeInput = 0x02;
@@ -193,6 +191,36 @@ bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payl
 
 }  // namespace
 
+std::vector<int> GBAStreamHost::CheckPortsInUse()
+{
+  std::vector<int> busy_ports;
+  bool any_stream_port_configured = false;
+
+  for (int device_number = 0; device_number < 4; ++device_number)
+  {
+    if (Config::Get(Config::GetInfoForSIDevice(device_number)) !=
+        SerialInterface::SIDEVICE_GC_GBA_STREAM)
+    {
+      continue;
+    }
+    any_stream_port_configured = true;
+
+    const auto port = static_cast<unsigned short>(kGBAStreamPlayerBasePort + device_number);
+    sf::TcpListener probe;
+    if (probe.listen(port) != sf::Socket::Status::Done)
+      busy_ports.push_back(port);
+  }
+
+  if (any_stream_port_configured)
+  {
+    sf::TcpListener probe;
+    if (probe.listen(kGBAStreamLobbyPort) != sf::Socket::Status::Done)
+      busy_ports.push_back(kGBAStreamLobbyPort);
+  }
+
+  return busy_ports;
+}
+
 GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
 {
   // Keeps the always-on lobby page (fixed port 6800) running for as long as
@@ -200,7 +228,7 @@ GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
   // which port(s) those are.
   GBAStreamLobby::AddRef();
 
-  const auto port = static_cast<unsigned short>(GBA_STREAM_BASE_PORT + device_number);
+  const auto port = static_cast<unsigned short>(kGBAStreamPlayerBasePort + device_number);
   const auto status = m_listener.listen(port);
   if (status != sf::Socket::Status::Done)
   {

@@ -27,8 +27,6 @@ namespace HW::GBA
 {
 namespace
 {
-constexpr unsigned short kLobbyPort = 6800;
-
 class LobbyServer
 {
 public:
@@ -46,10 +44,11 @@ public:
       return;
 
     m_stop = false;
-    const auto status = m_listener.listen(kLobbyPort);
+    const auto status = m_listener.listen(kGBAStreamLobbyPort);
     if (status != sf::Socket::Status::Done)
     {
-      ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamLobby: failed to listen on port {}", kLobbyPort);
+      ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamLobby: failed to listen on port {}",
+                   kGBAStreamLobbyPort);
       return;
     }
     m_running = true;
