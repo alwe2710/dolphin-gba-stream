@@ -745,8 +745,12 @@ if(USE_MGBA)
   target_sources(core PRIVATE
     HW/GBACore.cpp
     HW/GBACore.h
+    HW/GBAStreamClientPage.h
     HW/GBAStreamHost.cpp
     HW/GBAStreamHost.h
+    HW/GBAStreamLobby.cpp
+    HW/GBAStreamLobby.h
+    HW/GBAStreamNetUtil.h
     HW/SI/SI_DeviceGBAEmu.cpp
     HW/SI/SI_DeviceGBAEmu.h
   )

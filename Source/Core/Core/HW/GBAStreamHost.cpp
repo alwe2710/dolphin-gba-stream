@@ -31,6 +31,8 @@
 
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GBAPadEmu.h"
+#include "Core/HW/GBAStreamLobby.h"
+#include "Core/HW/GBAStreamNetUtil.h"
 
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 #include "InputCommon/InputConfig.h"
@@ -45,7 +47,9 @@ namespace
 constexpr u32 GBA_STREAM_WIDTH = 240;
 constexpr u32 GBA_STREAM_HEIGHT = 160;
 
-constexpr u16 GBA_STREAM_BASE_PORT = 6800;
+// Player ports start one above the lobby's fixed port (see GBAStreamLobby),
+// so the lobby URL never collides with a stream port.
+constexpr u16 GBA_STREAM_BASE_PORT = 6801;
 
 constexpr u8 kMsgTypeVideoFrame = 0x01;
 constexpr u8 kMsgTypeInput = 0x02;
@@ -158,37 +162,6 @@ std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
   return frame;
 }
 
-// Sends `size` bytes on a non-blocking socket, retrying on NotReady. Bounds
-// every wait to a short sleep so a stalled/frozen peer (e.g. a crashed
-// browser tab that stops draining its receive buffer) can never block this
-// thread forever -- `stop_flag` is checked on every retry so shutdown always
-// completes promptly regardless of what the remote end is doing.
-bool SendAllBytes(sf::TcpSocket& socket, const void* data, size_t size,
-                  const std::atomic_bool& stop_flag)
-{
-  const auto* bytes = static_cast<const u8*>(data);
-  size_t sent_total = 0;
-  while (sent_total < size)
-  {
-    if (stop_flag)
-      return false;
-    size_t sent = 0;
-    const auto status = socket.send(bytes + sent_total, size - sent_total, sent);
-    if (status == sf::Socket::Status::Done || status == sf::Socket::Status::Partial)
-    {
-      sent_total += sent;
-      continue;
-    }
-    if (status == sf::Socket::Status::NotReady)
-    {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
 bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payload,
                               const std::atomic_bool& stop_flag)
 {
@@ -218,230 +191,15 @@ bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payl
   return SendAllBytes(socket, frame.data(), frame.size(), stop_flag);
 }
 
-// Single-page client. Landing view is a P1-P4 lobby: for each of the four
-// possible GC ports it probes http://<host>:(6800+n)/status (see the
-// "/status" branch in PerformHandshake) to find out which ports currently
-// have a GBAStreamHost running at all (i.e. are configured as GBA
-// (Client-Stream)) and whether each is already occupied by another client,
-// then shows a picker with unavailable slots grayed out. Picking a slot opens
-// a WebSocket to that port and switches to the canvas+input view, which
-// decodes raw-deflate RGB565 frames and sends a 3-byte input message whenever
-// the locally-held button state changes. Served directly over plain HTTP GET
-// from the same port as the WebSocket endpoint, so no separate web
-// server/hosting is needed.
-constexpr std::string_view kClientHtml = R"HTML(<!doctype html>
-<html><head><meta charset="utf-8"><title>Dolphin GBA Stream</title>
-<style>
-  html,body{margin:0;background:#111;color:#ddd;font-family:sans-serif;height:100%;
-            display:flex;flex-direction:column;align-items:center;justify-content:center}
-  canvas{image-rendering:pixelated;width:min(96vw,720px);height:auto;border:1px solid #444}
-  #status{margin:8px;font-size:14px}
-  #settings{margin-top:8px;font-size:13px}
-  #settings button{margin:2px;min-width:80px}
-  #game{display:none;flex-direction:column;align-items:center}
-  #lobbyButtons{display:flex;gap:10px;margin-top:12px}
-  #lobbyButtons button{font-size:20px;min-width:64px;min-height:64px;cursor:pointer}
-  #lobbyButtons button:disabled{opacity:0.35;cursor:not-allowed}
-</style></head>
-<body>
-<div id="lobby">
-  <div id="lobbyStatus">Suche nach aktiven GBA-Slots...</div>
-  <div id="lobbyButtons"></div>
-</div>
-<div id="game">
-<div id="status">connecting...</div>
-<canvas id="screen" width="240" height="160"></canvas>
-<div id="settings"></div>
-</div>
-<script>
-const BASE_PORT = 6800;
-const lobbyEl = document.getElementById('lobby');
-const lobbyStatusEl = document.getElementById('lobbyStatus');
-const lobbyButtonsEl = document.getElementById('lobbyButtons');
-const gameEl = document.getElementById('game');
-
-async function checkSlot(n) {
-  const port = BASE_PORT + n;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 800);
-  try {
-    const res = await fetch('http://' + location.hostname + ':' + port + '/status',
-                            {signal: controller.signal});
-    if (!res.ok) return {exists: false};
-    const data = await res.json();
-    return {exists: true, occupied: !!data.occupied};
-  } catch (e) {
-    return {exists: false};
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function buildLobby() {
-  const results = await Promise.all([0, 1, 2, 3].map(checkSlot));
-  lobbyButtonsEl.innerHTML = '';
-  let anyExists = false;
-  results.forEach((r, i) => {
-    if (!r.exists) return;
-    anyExists = true;
-    const btn = document.createElement('button');
-    btn.textContent = 'P' + (i + 1);
-    btn.disabled = r.occupied;
-    btn.title = r.occupied ? 'Bereits verbunden' : 'Verbinden';
-    btn.onclick = () => {
-      lobbyEl.style.display = 'none';
-      gameEl.style.display = 'flex';
-      startStream(BASE_PORT + i);
-    };
-    lobbyButtonsEl.appendChild(btn);
-  });
-  lobbyStatusEl.textContent = anyExists ?
-      'Spieler wählen:' :
-      'Kein GameCube-Port ist aktuell auf "GBA (Client-Stream)" gestellt.';
-}
-buildLobby();
-
-function startStream(port) {
-const BUTTONS = [
-  ['A', 1<<0, 'KeyX'], ['B', 1<<1, 'KeyZ'], ['Select', 1<<2, 'ShiftRight'],
-  ['Start', 1<<3, 'Enter'], ['Right', 1<<4, 'ArrowRight'], ['Left', 1<<5, 'ArrowLeft'],
-  ['Up', 1<<6, 'ArrowUp'], ['Down', 1<<7, 'ArrowDown'], ['R', 1<<8, 'KeyS'], ['L', 1<<9, 'KeyA'],
-];
-const stored = JSON.parse(localStorage.getItem('gbaStreamBindings') || '{}');
-const bindings = {};
-for (const [name, , def] of BUTTONS) bindings[name] = stored[name] || def;
-function saveBindings() { localStorage.setItem('gbaStreamBindings', JSON.stringify(bindings)); }
-
-let keyState = 0;
-const codeToButton = {};
-function rebuildCodeMap() {
-  for (const k in codeToButton) delete codeToButton[k];
-  for (const [name, bit] of BUTTONS) codeToButton[bindings[name]] = bit;
-}
-rebuildCodeMap();
-
-const statusEl = document.getElementById('status');
-const canvas = document.getElementById('screen');
-const ctx = canvas.getContext('2d');
-let imageData = ctx.createImageData(240, 160);
-
-// Created here (inside the P-button's click handler call chain) so the
-// browser's autoplay policy -- which requires audio to start from a user
-// gesture -- is satisfied without any extra "click to enable sound" step.
-const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-let nextAudioTime = 0;
-
-function playAudioChunk(sampleRate, channels, view, byteOffset, sampleCount) {
-  const frameCount = sampleCount / channels;
-  if (frameCount <= 0) return;
-  const buffer = audioCtx.createBuffer(channels, frameCount, sampleRate);
-  for (let ch = 0; ch < channels; ch++) {
-    const channelData = buffer.getChannelData(ch);
-    for (let i = 0; i < frameCount; i++) {
-      channelData[i] = view.getInt16(byteOffset + (i * channels + ch) * 2, true) / 32768;
-    }
-  }
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioCtx.destination);
-  const now = audioCtx.currentTime;
-  // Small safety cushion, and resync if playback ever falls behind real time
-  // (e.g. after a stall) instead of trying to catch up by queueing forever.
-  if (nextAudioTime < now + 0.05) nextAudioTime = now + 0.05;
-  source.start(nextAudioTime);
-  nextAudioTime += buffer.duration;
-}
-
-const ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
-ws.binaryType = 'arraybuffer';
-ws.onopen = () => statusEl.textContent = 'connected';
-ws.onclose = () => statusEl.textContent = 'disconnected';
-ws.onerror = () => statusEl.textContent = 'error';
-
-ws.onmessage = async (ev) => {
-  const view = new DataView(ev.data);
-  const type = view.getUint8(0);
-  if (type === 3) {
-    const sampleRate = view.getUint32(1, true);
-    const channels = view.getUint8(5);
-    const sampleCount = (ev.data.byteLength - 6) / 2;
-    playAudioChunk(sampleRate, channels, view, 6, sampleCount);
-    return;
-  }
-  if (type !== 1) return;
-  const width = view.getUint32(1, true);
-  const height = view.getUint32(5, true);
-  const compressed = ev.data.slice(9);
-  const raw = await new Response(
-      new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
-  ).arrayBuffer();
-  const pixels = new DataView(raw);
-  if (imageData.width !== width || imageData.height !== height) {
-    canvas.width = width; canvas.height = height;
-    imageData = ctx.createImageData(width, height);
-  }
-  const data = imageData.data;
-  for (let i = 0; i < width * height; i++) {
-    const p = pixels.getUint16(i * 2, true);
-    const r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
-    data[i*4+0] = (r * 255 / 31) | 0;
-    data[i*4+1] = (g * 255 / 63) | 0;
-    data[i*4+2] = (b * 255 / 31) | 0;
-    data[i*4+3] = 255;
-  }
-  ctx.putImageData(imageData, 0, 0);
-};
-
-function sendKeys() {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  const msg = new Uint8Array(3);
-  msg[0] = 2; msg[1] = keyState & 0xFF; msg[2] = (keyState >> 8) & 0xFF;
-  ws.send(msg);
-}
-window.addEventListener('keydown', (e) => {
-  const bit = codeToButton[e.code];
-  if (!bit) return;
-  e.preventDefault();
-  if (!(keyState & bit)) { keyState |= bit; sendKeys(); }
-});
-window.addEventListener('keyup', (e) => {
-  const bit = codeToButton[e.code];
-  if (!bit) return;
-  e.preventDefault();
-  if (keyState & bit) { keyState &= ~bit; sendKeys(); }
-});
-
-const settingsEl = document.getElementById('settings');
-function renderSettings() {
-  settingsEl.innerHTML = '';
-  for (const [name, bit] of BUTTONS) {
-    const btn = document.createElement('button');
-    btn.textContent = name + ': ' + bindings[name];
-    btn.onclick = () => {
-      btn.textContent = name + ': press a key...';
-      const onKey = (e) => {
-        e.preventDefault();
-        bindings[name] = e.code;
-        saveBindings();
-        rebuildCodeMap();
-        renderSettings();
-        window.removeEventListener('keydown', onKey, true);
-      };
-      window.addEventListener('keydown', onKey, true);
-    };
-    settingsEl.appendChild(btn);
-  }
-}
-renderSettings();
-}  // startStream
-</script>
-</body></html>
-)HTML";
-
 }  // namespace
 
 GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
 {
+  // Keeps the always-on lobby page (fixed port 6800) running for as long as
+  // at least one GC port is configured as GBA (Client-Stream), regardless of
+  // which port(s) those are.
+  GBAStreamLobby::AddRef();
+
   const auto port = static_cast<unsigned short>(GBA_STREAM_BASE_PORT + device_number);
   const auto status = m_listener.listen(port);
   if (status != sf::Socket::Status::Done)
@@ -461,6 +219,7 @@ GBAStreamHost::~GBAStreamHost()
   if (m_accept_thread.joinable())
     m_accept_thread.join();
   DetachInputOverride();
+  GBAStreamLobby::Release();
 }
 
 void GBAStreamHost::GameChanged()
@@ -576,11 +335,11 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
 
   if (path == "/status")
   {
-    // Queried cross-port by the lobby screen (see kClientHtml) to find out which
-    // GC ports are currently configured as GBA (Client-Stream) and whether each
-    // one already has a client attached, so it can show a P1-P4 picker with
-    // taken slots grayed out. CORS is required since the lobby page is loaded
-    // from one port but fetch()es the status of the other three.
+    // Queried cross-port by the lobby page (GBAStreamLobby, GBAStreamClientPage.h)
+    // to find out which GC ports are currently configured as GBA (Client-Stream)
+    // and whether each one already has a client attached, so it can show a
+    // P1-P4 picker with taken slots grayed out. CORS is required since the
+    // lobby always lives on a different port (6800) than this one.
     const std::string body =
         std::string("{\"occupied\":") + (m_client_connected ? "true" : "false") + "}";
     std::ostringstream response;
@@ -597,12 +356,18 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
 
   if (upgrade != "websocket" || !headers.count("sec-websocket-key"))
   {
+    // Player ports are API-only (status + WebSocket); send anyone who
+    // navigates here directly (e.g. an old bookmark) to the lobby (fixed
+    // port 6800) instead of duplicating its page here.
+    std::string host = headers.count("host") ? headers["host"] : "localhost";
+    const auto colon = host.find(':');
+    if (colon != std::string::npos)
+      host.resize(colon);
+
     std::ostringstream response;
-    response << "HTTP/1.1 200 OK\r\n"
-             << "Content-Type: text/html; charset=utf-8\r\n"
-             << "Content-Length: " << kClientHtml.size() << "\r\n"
-             << "Connection: close\r\n\r\n"
-             << kClientHtml;
+    response << "HTTP/1.1 302 Found\r\n"
+             << "Location: http://" << host << ":6800/\r\n"
+             << "Connection: close\r\n\r\n";
     const std::string response_str = response.str();
     SendAllBytes(socket, response_str.data(), response_str.size(), m_stop);
     return true;

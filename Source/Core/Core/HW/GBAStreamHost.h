@@ -23,12 +23,16 @@ namespace HW::GBA
 {
 // GBAHostInterface implementation backing the "GBA (Client-Stream)" SI device.
 //
-// Serves the integrated GBA's video output to a single browser client over a
-// small custom protocol (one WebSocket connection per GC port, video frames
-// server->client, button state client->server), and feeds received button
-// presses into the GBA pad via ControllerEmu's input-override mechanism (the
-// same mechanism the GBA TAS input dialog uses). See GBAStreamHost.cpp for the
-// wire format. This class never touches VideoBackends or GBAWidget.
+// One instance per GC port configured as GBA (Client-Stream), each listening
+// on its own player port (6801-6804) for a single browser client: video
+// frames and audio go server->client, button state comes back client->server,
+// all over one small custom WebSocket-based protocol (see GBAStreamHost.cpp
+// for the wire format). Received input is fed into the GBA pad via
+// ControllerEmu's input-override mechanism (the same mechanism the GBA TAS
+// input dialog uses). The human-facing P1-P4 picker page itself is served
+// separately by GBAStreamLobby on a fixed port (6800); this class only
+// answers a tiny /status JSON query for it. This class never touches
+// VideoBackends or GBAWidget.
 class GBAStreamHost final : public GBAHostInterface
 {
 public:
