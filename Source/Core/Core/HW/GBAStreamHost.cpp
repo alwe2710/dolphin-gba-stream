@@ -540,12 +540,17 @@ void GBAStreamHost::AudioRateChanged(u32 sample_rate)
 
 bool GBAStreamHost::ForwardAudioSamples(std::span<const s16> samples, u32 channels)
 {
-  if (!m_client_connected)
-    return false;  // No client listening right now -- fall back to local speakers.
-
-  std::lock_guard<std::mutex> lock(m_audio_mutex);
-  m_pending_audio.insert(m_pending_audio.end(), samples.begin(), samples.end());
-  m_audio_channels = channels;
+  // Unlike video/input, audio is never allowed to fall back to the local
+  // speakers for a GBA (Client-Stream) port, connected client or not: this
+  // slot's audio belongs to whichever remote player it's streaming to, full
+  // stop. If nobody is connected the samples are simply dropped (nobody is
+  // listening on the network side either), rather than played locally.
+  if (m_client_connected)
+  {
+    std::lock_guard<std::mutex> lock(m_audio_mutex);
+    m_pending_audio.insert(m_pending_audio.end(), samples.begin(), samples.end());
+    m_audio_channels = channels;
+  }
   return true;
 }
 
