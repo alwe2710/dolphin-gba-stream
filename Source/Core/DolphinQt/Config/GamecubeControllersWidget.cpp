@@ -36,6 +36,7 @@ static constexpr std::array s_gc_types = {
     SIDeviceName{SerialInterface::SIDEVICE_GC_TARUKONGA, _trans("DK Bongos")},
 #ifdef HAS_LIBMGBA
     SIDeviceName{SerialInterface::SIDEVICE_GC_GBA_EMULATED, _trans("GBA (Integrated)")},
+    SIDeviceName{SerialInterface::SIDEVICE_GC_GBA_STREAM, _trans("GBA (Client-Stream)")},
 #endif
     SIDeviceName{SerialInterface::SIDEVICE_GC_GBA, _trans("GBA (TCP)")},
     SIDeviceName{SerialInterface::SIDEVICE_GC_KEYBOARD, _trans("Keyboard Controller")},
@@ -149,6 +150,7 @@ void GamecubeControllersWidget::OnGCPadConfigure(size_t index)
     type = MappingWindow::Type::MAPPING_GC_BONGOS;
     break;
   case SerialInterface::SIDEVICE_GC_GBA_EMULATED:
+  case SerialInterface::SIDEVICE_GC_GBA_STREAM:
     type = MappingWindow::Type::MAPPING_GC_GBA;
     break;
   case SerialInterface::SIDEVICE_GC_KEYBOARD:

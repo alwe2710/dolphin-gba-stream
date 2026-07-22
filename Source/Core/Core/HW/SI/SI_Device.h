@@ -101,6 +101,7 @@ enum SIDevices : int
   SIDEVICE_AM_BASEBOARD,
   SIDEVICE_WIIU_ADAPTER,
   SIDEVICE_GC_GBA_EMULATED,
+  SIDEVICE_GC_GBA_STREAM,
   // Not a valid device. Used for checking whether enum values are valid.
   SIDEVICE_COUNT,
 };

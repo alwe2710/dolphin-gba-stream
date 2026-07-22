@@ -182,6 +182,7 @@ std::unique_ptr<ISIDevice> SIDevice_Create(Core::System& system, const SIDevices
     return std::make_unique<CSIDevice_GBA>(system, device, port_number);
 
   case SIDEVICE_GC_GBA_EMULATED:
+  case SIDEVICE_GC_GBA_STREAM:
 #ifdef HAS_LIBMGBA
     return std::make_unique<CSIDevice_GBAEmu>(system, device, port_number);
 #else

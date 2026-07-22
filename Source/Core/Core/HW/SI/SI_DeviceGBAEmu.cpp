@@ -14,6 +14,7 @@
 #include "Core/CoreTiming.h"
 #include "Core/HW/GBACore.h"
 #include "Core/HW/GBAPad.h"
+#include "Core/HW/GBAStreamHost.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_DeviceGCController.h"
 #include "Core/HW/SystemTimers.h"
@@ -33,7 +34,10 @@ CSIDevice_GBAEmu::CSIDevice_GBAEmu(Core::System& system, SIDevices device, int d
 {
   m_core = std::make_shared<HW::GBA::Core>(system, m_device_number);
   m_core->Start(system.GetCoreTiming().GetTicks());
-  m_gbahost = Host_CreateGBAHost(m_core);
+  if (device == SIDEVICE_GC_GBA_STREAM)
+    m_gbahost = std::make_shared<HW::GBA::GBAStreamHost>(m_device_number);
+  else
+    m_gbahost = Host_CreateGBAHost(m_core);
   m_core->SetHost(m_gbahost);
   system.GetSerialInterface().ScheduleEvent(m_device_number,
                                             GetSyncInterval(system.GetSystemTimers()));
