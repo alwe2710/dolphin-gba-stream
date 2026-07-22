@@ -19,9 +19,14 @@ namespace HW::GBA
 // grayed out. Picking a slot opens a WebSocket directly to that player port
 // and switches to the canvas+input view, which decodes raw-deflate RGB565
 // video frames, plays PCM audio via the Web Audio API, and sends a 3-byte
-// input message whenever the locally-held button state changes. On a
-// touch-capable device (phones/tablets, which have no physical keyboard) an
-// on-screen D-pad and button overlay is shown automatically.
+// input message whenever the locally-held button state changes.
+//
+// On a touch-capable device (phones/tablets, which have no physical
+// keyboard) the video goes fullscreen with a mobile-emulator-style D-pad and
+// button overlay drawn directly on top of it, the desktop keyboard-rebind
+// panel is hidden, and a small centered hamburger button opens a menu for
+// binding a connected game controller (Gamepad API) and for hiding the
+// overlay for players who'd rather use a controller alone.
 inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><title>Dolphin GBA Stream</title>
 <style>
@@ -36,15 +41,50 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   #lobbyButtons{display:flex;gap:10px;margin-top:12px}
   #lobbyButtons button{font-size:20px;min-width:64px;min-height:64px;cursor:pointer}
   #lobbyButtons button:disabled{opacity:0.35;cursor:not-allowed}
-  #touchControls{position:fixed;left:0;right:0;bottom:0;display:none;justify-content:space-between;
-                 align-items:flex-end;padding:16px;box-sizing:border-box;pointer-events:none}
-  #touchDpad{display:grid;grid-template-columns:repeat(3, 52px);grid-template-rows:repeat(3, 52px);
-             grid-template-areas:". u ." "l . r" ". d .";gap:4px;pointer-events:auto}
-  #touchActions{display:flex;gap:10px;align-items:flex-end;pointer-events:auto}
-  .tbtn{font-size:16px;border-radius:8px;border:1px solid #666;background:rgba(255,255,255,0.15);
-        color:#fff;user-select:none;-webkit-user-select:none;touch-action:none}
+
+  /* Mobile: fullscreen video with the D-pad/buttons drawn on top of it,
+     like a typical mobile emulator, instead of the desktop's bordered,
+     centered canvas with controls below it. */
+  body.mobile{overflow:hidden}
+  body.mobile #game{position:fixed;inset:0;width:100vw;height:100vh;background:#000}
+  body.mobile canvas{position:absolute;top:0;left:0;width:100%;height:100%;
+                      object-fit:contain;border:none}
+  body.mobile #settings{display:none}
+  body.mobile #status{position:fixed;top:6px;left:6px;margin:0;z-index:5;font-size:11px;
+                       background:rgba(0,0,0,0.4);padding:2px 6px;border-radius:4px}
+
+  /* Absolutely positioned within the fixed full-viewport container, laid out
+     like a typical mobile emulator: shoulder buttons in the top corners,
+     D-pad bottom-left, Select/Start (small) stacked above the big A/B
+     buttons bottom-right -- keeps the bottom-right cluster narrow enough to
+     never overflow off-screen on narrow phones, unlike a single wide row. */
+  #touchControls{position:fixed;inset:0;display:none;pointer-events:none;z-index:10}
+  .tshoulder{position:absolute;top:14px;width:56px;height:40px;font-size:14px}
+  #touchL{left:14px}
+  #touchR{right:14px}
+  #touchDpad{position:absolute;left:20px;bottom:24px;
+             display:grid;grid-template-columns:repeat(3, 52px);grid-template-rows:repeat(3, 52px);
+             grid-template-areas:". u ." "l . r" ". d ."}
+  #touchRight{position:absolute;right:20px;bottom:24px;
+              display:flex;flex-direction:column;align-items:flex-end;gap:12px}
+  #touchStartSelect{display:flex;gap:8px}
+  #touchAB{display:flex;gap:12px}
+  .tbtn{font-size:16px;border-radius:8px;border:1px solid rgba(255,255,255,0.5);
+        background:rgba(255,255,255,0.15);color:#fff;user-select:none;
+        -webkit-user-select:none;touch-action:none;pointer-events:auto}
   .tbtn.round{border-radius:50%;width:52px;height:52px}
   .tbtn.big{width:64px;height:64px;font-size:20px}
+  .tbtn.small{width:48px;height:32px;font-size:11px;border-radius:6px}
+
+  #menuButton{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+              width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,0.45);
+              color:#fff;border:1px solid rgba(255,255,255,0.5);font-size:20px;
+              line-height:44px;padding:0;z-index:20}
+  #menuPanel{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.9);color:#fff;
+             z-index:30;flex-direction:column;align-items:center;justify-content:center;
+             gap:8px;padding:16px;box-sizing:border-box;overflow:auto;text-align:center}
+  #menuPanel button{margin:2px;min-width:100px}
+  #gamepadBindingsList{display:flex;flex-direction:column;gap:4px;margin:8px 0}
 </style></head>
 <body>
 <div id="lobby">
@@ -56,20 +96,34 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 <canvas id="screen" width="240" height="160"></canvas>
 <div id="settings"></div>
 <div id="touchControls">
+  <button class="tbtn tshoulder" id="touchL" data-name="L">L</button>
+  <button class="tbtn tshoulder" id="touchR" data-name="R">R</button>
   <div id="touchDpad">
     <button class="tbtn" data-name="Up" style="grid-area:u">▲</button>
     <button class="tbtn" data-name="Left" style="grid-area:l">◀</button>
     <button class="tbtn" data-name="Right" style="grid-area:r">▶</button>
     <button class="tbtn" data-name="Down" style="grid-area:d">▼</button>
   </div>
-  <div id="touchActions">
-    <button class="tbtn round" data-name="Select">SEL</button>
-    <button class="tbtn round" data-name="Start">STA</button>
-    <button class="tbtn round" data-name="L">L</button>
-    <button class="tbtn round" data-name="R">R</button>
-    <button class="tbtn round big" data-name="B">B</button>
-    <button class="tbtn round big" data-name="A">A</button>
+  <div id="touchRight">
+    <div id="touchStartSelect">
+      <button class="tbtn small" data-name="Select">SEL</button>
+      <button class="tbtn small" data-name="Start">STA</button>
+    </div>
+    <div id="touchAB">
+      <button class="tbtn round big" data-name="B">B</button>
+      <button class="tbtn round big" data-name="A">A</button>
+    </div>
   </div>
+</div>
+<button id="menuButton">&#9776;</button>
+<div id="menuPanel">
+  <h3 style="margin:0">Menü</h3>
+  <div>
+    <label><input type="checkbox" id="toggleOverlay"> Touch-Overlay anzeigen</label>
+  </div>
+  <div>Gamecontroller-Belegung:</div>
+  <div id="gamepadBindingsList"></div>
+  <button id="closeMenu">Schließen</button>
 </div>
 </div>
 <script>
@@ -129,18 +183,13 @@ const BUTTONS = [
 const nameToBit = {};
 for (const [name, bit] of BUTTONS) nameToBit[name] = bit;
 
-const stored = JSON.parse(localStorage.getItem('gbaStreamBindings') || '{}');
-const bindings = {};
-for (const [name, , def] of BUTTONS) bindings[name] = stored[name] || def;
-function saveBindings() { localStorage.setItem('gbaStreamBindings', JSON.stringify(bindings)); }
+// Any touch-capable device is treated as mobile: fullscreen video, on-screen
+// overlay instead of the keyboard-rebind panel, and the hamburger menu for
+// optional gamepad binding.
+const isMobile = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isMobile) document.body.classList.add('mobile');
 
 let keyState = 0;
-const codeToButton = {};
-function rebuildCodeMap() {
-  for (const k in codeToButton) delete codeToButton[k];
-  for (const [name, bit] of BUTTONS) codeToButton[bindings[name]] = bit;
-}
-rebuildCodeMap();
 
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('screen');
@@ -220,6 +269,18 @@ function sendKeys() {
   msg[0] = 2; msg[1] = keyState & 0xFF; msg[2] = (keyState >> 8) & 0xFF;
   ws.send(msg);
 }
+
+// --- Physical keyboard (desktop, or a Bluetooth keyboard paired to a phone) ---
+const stored = JSON.parse(localStorage.getItem('gbaStreamBindings') || '{}');
+const bindings = {};
+for (const [name, , def] of BUTTONS) bindings[name] = stored[name] || def;
+function saveBindings() { localStorage.setItem('gbaStreamBindings', JSON.stringify(bindings)); }
+const codeToButton = {};
+function rebuildCodeMap() {
+  for (const k in codeToButton) delete codeToButton[k];
+  for (const [name, bit] of BUTTONS) codeToButton[bindings[name]] = bit;
+}
+rebuildCodeMap();
 window.addEventListener('keydown', (e) => {
   const bit = codeToButton[e.code];
   if (!bit) return;
@@ -233,14 +294,68 @@ window.addEventListener('keyup', (e) => {
   if (keyState & bit) { keyState &= ~bit; sendKeys(); }
 });
 
-// Phones/tablets have no physical keyboard, so show an on-screen D-pad and
-// button overlay for any touch-capable device instead of relying on the
-// keybinding settings below (which still work fine for a Bluetooth keyboard
-// on such a device, if the player has one).
-const isMobile = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+// --- Mobile-only: on-screen touch overlay (drawn on top of the fullscreen
+// video like a typical mobile emulator) and optional game-controller
+// binding via the hamburger menu. Both are irrelevant on desktop, which
+// already has the keyboard-rebind panel below. ---
 const touchControlsEl = document.getElementById('touchControls');
 if (isMobile) {
-  touchControlsEl.style.display = 'flex';
+  const GAMEPAD_DEFAULTS = {A: 0, B: 1, Select: 8, Start: 9, Up: 12, Down: 13, Left: 14,
+                            Right: 15, L: 4, R: 5};
+  const gamepadBindings =
+      JSON.parse(localStorage.getItem('gbaStreamGamepadBindings') || 'null') ||
+      Object.assign({}, GAMEPAD_DEFAULTS);
+  function saveGamepadBindings() {
+    localStorage.setItem('gbaStreamGamepadBindings', JSON.stringify(gamepadBindings));
+  }
+  let activeGamepadIndex = null;
+  window.addEventListener('gamepadconnected', (e) => { activeGamepadIndex = e.gamepad.index; });
+  window.addEventListener('gamepaddisconnected', (e) => {
+    if (activeGamepadIndex === e.gamepad.index) activeGamepadIndex = null;
+  });
+  let lastGamepadState = 0;
+  function pollGamepad() {
+    if (activeGamepadIndex !== null) {
+      const gp = navigator.getGamepads()[activeGamepadIndex];
+      if (gp) {
+        let newState = 0;
+        for (const [name, bit] of BUTTONS) {
+          const idx = gamepadBindings[name];
+          if (idx !== undefined && gp.buttons[idx] && gp.buttons[idx].pressed) newState |= bit;
+        }
+        if (newState !== lastGamepadState) {
+          // Merge: clear bits the gamepad used to hold, set the ones it
+          // holds now, leave bits held by keyboard/touch alone.
+          keyState = (keyState & ~lastGamepadState) | newState;
+          lastGamepadState = newState;
+          sendKeys();
+        }
+      }
+    }
+    requestAnimationFrame(pollGamepad);
+  }
+  requestAnimationFrame(pollGamepad);
+
+  function rebindGamepadButton(name, onDone) {
+    if (activeGamepadIndex === null) { onDone(); return; }
+    const baseline = navigator.getGamepads()[activeGamepadIndex].buttons.map((b) => b.pressed);
+    function check() {
+      const gp = navigator.getGamepads()[activeGamepadIndex];
+      if (gp) {
+        for (let i = 0; i < gp.buttons.length; i++) {
+          if (gp.buttons[i].pressed && !baseline[i]) {
+            gamepadBindings[name] = i;
+            saveGamepadBindings();
+            onDone();
+            return;
+          }
+        }
+      }
+      requestAnimationFrame(check);
+    }
+    requestAnimationFrame(check);
+  }
+
   touchControlsEl.querySelectorAll('.tbtn').forEach((btn) => {
     const bit = nameToBit[btn.dataset.name];
     const press = (e) => { e.preventDefault(); if (!(keyState & bit)) { keyState |= bit; sendKeys(); } };
@@ -249,30 +364,84 @@ if (isMobile) {
     btn.addEventListener('touchend', release, {passive: false});
     btn.addEventListener('touchcancel', release, {passive: false});
   });
+
+  const overlayStored = localStorage.getItem('gbaStreamShowOverlay');
+  const showOverlay = overlayStored === null ? true : overlayStored === 'true';
+  touchControlsEl.style.display = showOverlay ? 'block' : 'none';
+
+  // Best-effort true fullscreen (hides browser chrome too); harmless if the
+  // browser blocks it since the CSS-driven fullscreen layout still applies.
+  document.documentElement.requestFullscreen?.().catch(() => {});
+
+  const menuButton = document.getElementById('menuButton');
+  const menuPanel = document.getElementById('menuPanel');
+  const overlayToggle = document.getElementById('toggleOverlay');
+  const gamepadListEl = document.getElementById('gamepadBindingsList');
+  overlayToggle.checked = showOverlay;
+  overlayToggle.onchange = () => {
+    touchControlsEl.style.display = overlayToggle.checked ? 'block' : 'none';
+    localStorage.setItem('gbaStreamShowOverlay', overlayToggle.checked);
+  };
+
+  function renderGamepadBindingsList() {
+    gamepadListEl.innerHTML = '';
+    if (activeGamepadIndex === null) {
+      const hint = document.createElement('div');
+      hint.textContent = 'Kein Controller erkannt -- bitte verbinden und einen Knopf drücken.';
+      gamepadListEl.appendChild(hint);
+    }
+    for (const [name] of BUTTONS) {
+      const row = document.createElement('div');
+      const label = document.createElement('span');
+      label.textContent = name + ': ' +
+          (gamepadBindings[name] !== undefined ? ('Knopf ' + gamepadBindings[name]) :
+                                                  'nicht belegt') + '  ';
+      const btn = document.createElement('button');
+      btn.textContent = 'Belegen';
+      btn.onclick = () => {
+        btn.textContent = 'Drücke einen Knopf...';
+        rebindGamepadButton(name, renderGamepadBindingsList);
+      };
+      row.appendChild(label);
+      row.appendChild(btn);
+      gamepadListEl.appendChild(row);
+    }
+  }
+
+  menuButton.style.display = 'flex';
+  menuButton.onclick = () => {
+    menuPanel.style.display = 'flex';
+    renderGamepadBindingsList();
+  };
+  document.getElementById('closeMenu').onclick = () => { menuPanel.style.display = 'none'; };
 }
 
-const settingsEl = document.getElementById('settings');
-function renderSettings() {
-  settingsEl.innerHTML = '';
-  for (const [name, bit] of BUTTONS) {
-    const btn = document.createElement('button');
-    btn.textContent = name + ': ' + bindings[name];
-    btn.onclick = () => {
-      btn.textContent = name + ': press a key...';
-      const onKey = (e) => {
-        e.preventDefault();
-        bindings[name] = e.code;
-        saveBindings();
-        rebuildCodeMap();
-        renderSettings();
-        window.removeEventListener('keydown', onKey, true);
+// The desktop keyboard-rebind panel has no purpose on a touch device -- it
+// shows the mobile overlay/gamepad menu instead (see above).
+if (!isMobile) {
+  const settingsEl = document.getElementById('settings');
+  function renderSettings() {
+    settingsEl.innerHTML = '';
+    for (const [name, bit] of BUTTONS) {
+      const btn = document.createElement('button');
+      btn.textContent = name + ': ' + bindings[name];
+      btn.onclick = () => {
+        btn.textContent = name + ': press a key...';
+        const onKey = (e) => {
+          e.preventDefault();
+          bindings[name] = e.code;
+          saveBindings();
+          rebuildCodeMap();
+          renderSettings();
+          window.removeEventListener('keydown', onKey, true);
+        };
+        window.addEventListener('keydown', onKey, true);
       };
-      window.addEventListener('keydown', onKey, true);
-    };
-    settingsEl.appendChild(btn);
+      settingsEl.appendChild(btn);
+    }
   }
+  renderSettings();
 }
-renderSettings();
 }  // startStream
 </script>
 </body></html>
