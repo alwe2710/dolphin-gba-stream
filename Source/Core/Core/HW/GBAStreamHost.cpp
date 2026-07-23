@@ -600,6 +600,20 @@ bool GBAStreamHost::ForwardAudioSamples(std::span<const s16> samples, u32 channe
     std::lock_guard<std::mutex> lock(m_audio_mutex);
     m_pending_audio.insert(m_pending_audio.end(), samples.begin(), samples.end());
     m_audio_channels = channels;
+
+    // Backstop for the time it takes SendAllBytes' own timeout to notice a
+    // stalled client: without a cap, a send loop stuck waiting on a wedged
+    // peer would let this queue -- fed independently from the GBA audio
+    // thread -- grow without bound. ~2s of 48kHz stereo audio is generous
+    // enough to never trim during normal playback; if it's ever hit, the
+    // oldest samples are dropped since a backlog that size is already
+    // inaudibly stale.
+    constexpr size_t kMaxPendingSamples = 48000 * 2 * 2;
+    if (m_pending_audio.size() > kMaxPendingSamples)
+    {
+      m_pending_audio.erase(m_pending_audio.begin(),
+                            m_pending_audio.end() - static_cast<ptrdiff_t>(kMaxPendingSamples));
+    }
   }
   return true;
 }

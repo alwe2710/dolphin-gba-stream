@@ -42,9 +42,18 @@ inline bool SendAllBytes(sf::TcpSocket& socket, const void* data, size_t size,
 {
   const auto* bytes = static_cast<const u8*>(data);
   size_t sent_total = 0;
+  // Bounds the whole call, not just each retry: a peer that stops reading
+  // (a phone whose screen locked or that walked out of Wi-Fi range without a
+  // clean disconnect) makes the socket report NotReady indefinitely from our
+  // side, since that only means "the OS send buffer is full", not "the
+  // connection is dead". Giving up after a few seconds turns that into an
+  // ordinary failed send -- callers already treat a false return as "this
+  // connection is over" -- instead of blocking this GBA slot's whole
+  // video/audio/input pump for as long as the peer stays wedged.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   while (sent_total < size)
   {
-    if (stop_flag)
+    if (stop_flag || std::chrono::steady_clock::now() > deadline)
       return false;
     size_t sent = 0;
     const auto status = socket.send(bytes + sent_total, size - sent_total, sent);
