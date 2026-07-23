@@ -48,10 +48,20 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);
             height:100%;display:flex;flex-direction:column;align-items:center;
             justify-content:center;overscroll-behavior:none}
-  canvas{image-rendering:pixelated;width:min(96vw,720px);height:auto;
-         border:var(--border);border-radius:12px}
-  #status{margin:8px;font-size:13px;color:var(--muted)}
-  #game{display:none;flex-direction:column;align-items:center;width:100%}
+
+  /* The video always fills as much of the browser window as the GBA's 3:2
+     aspect ratio allows (desktop: JS sizes the canvas element itself so
+     #videoWrap -- and therefore the gear button pinned to its corner --
+     shrink-wraps to exactly the visible image, not the letterboxed
+     viewport; mobile: plain object-fit:contain, no JS sizing needed since
+     its overlay controls intentionally span the whole screen instead of
+     hugging the image). */
+  #game{display:none;position:fixed;inset:0;width:100vw;height:100vh;background:#000;
+        align-items:center;justify-content:center}
+  #status{position:absolute;top:8px;left:8px;margin:0;z-index:5;font-size:11px;
+          color:var(--ink);background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:20px}
+  #videoWrap{position:relative;line-height:0}
+  canvas{image-rendering:pixelated;display:block;border:var(--border);border-radius:12px}
 
   /* ---------- Lobby: rounded "cartridge" tiles joined by a thin link-cable
      line, referencing the physical GC-GBA link cable this feature emulates. ---------- */
@@ -80,15 +90,14 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   .slot:disabled .dot{background:var(--muted)}
   .slot:disabled{cursor:not-allowed;opacity:0.7}
 
-  /* Mobile: fullscreen video with the D-pad/buttons drawn on top of it,
-     like a typical mobile emulator, instead of the desktop's bordered,
-     centered canvas with controls below it. */
+  /* Mobile: the D-pad/buttons overlay is drawn on top of the video like a
+     typical mobile emulator and intentionally spans the whole screen
+     (rather than hugging the image like the desktop gear button does), so
+     #videoWrap just needs to fill #game and let object-fit do the letterbox
+     -- no JS sizing needed, unlike desktop. */
   body.mobile{overflow:hidden}
-  body.mobile #game{position:fixed;inset:0;width:100vw;height:100vh;background:#000}
-  body.mobile canvas{position:absolute;top:0;left:0;width:100%;height:100%;
-                      object-fit:contain;border:none;border-radius:0}
-  body.mobile #status{position:fixed;top:6px;left:6px;margin:0;z-index:5;font-size:11px;
-                       background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:20px}
+  body.mobile #videoWrap{width:100%;height:100%}
+  body.mobile canvas{width:100%;height:100%;object-fit:contain;border:none;border-radius:0}
 
   /* Absolutely positioned within the fixed full-viewport container, laid out
      like a typical mobile emulator: shoulder buttons in the top corners,
@@ -159,7 +168,10 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   /* ---------- Desktop keyboard-rebind: a gear button bottom-right opens a
      table of button->key assignments, mirroring the mobile hamburger menu's
      role but as a table since there's no touch overlay to keep in view. ---------- */
-  #settingsButton{display:none;position:fixed;right:16px;bottom:16px;
+  /* Positioned absolute within #videoWrap (not fixed to the viewport) so it
+     sits right on the corner of the visible image itself, letterboxing or
+     not. */
+  #settingsButton{display:none;position:absolute;right:8px;bottom:8px;
                   width:42px;height:42px;border-radius:50%;background:var(--surface);
                   color:var(--ink);border:var(--border);font-size:18px;
                   padding:0;z-index:20;align-items:center;justify-content:center;cursor:pointer}
@@ -195,8 +207,10 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 </div>
 <div id="game">
 <div id="status">connecting...</div>
-<canvas id="screen" width="240" height="160"></canvas>
-<button id="settingsButton" title="Tastenbelegung">&#9881;</button>
+<div id="videoWrap">
+  <canvas id="screen" width="240" height="160"></canvas>
+  <button id="settingsButton" title="Tastenbelegung">&#9881;</button>
+</div>
 <div id="settingsPanel">
   <h3>Tastenbelegung</h3>
   <table id="settingsTable">
@@ -314,6 +328,27 @@ const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 let imageData = ctx.createImageData(240, 160);
 
+// Desktop only: mobile lets object-fit:contain (see CSS) do the letterboxing
+// responsively for free. Here we size the canvas element itself in exact
+// pixels so #videoWrap -- an inline-block that shrink-wraps to its only
+// normal-flow child, the canvas -- ends up exactly matching the visible
+// image, with nothing left over for the settings gear (absolutely
+// positioned inside #videoWrap) to float in.
+function resizeDesktopCanvas() {
+  if (isMobile) return;
+  const aspect = canvas.width / canvas.height;
+  let w = window.innerWidth * 0.96;
+  let h = w / aspect;
+  if (h > window.innerHeight * 0.96) {
+    h = window.innerHeight * 0.96;
+    w = h * aspect;
+  }
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+}
+window.addEventListener('resize', resizeDesktopCanvas);
+resizeDesktopCanvas();
+
 // Created here (inside the P-button's click handler call chain) so the
 // browser's autoplay policy -- which requires audio to start from a user
 // gesture -- is satisfied without any extra "click to enable sound" step.
@@ -368,6 +403,7 @@ ws.onmessage = async (ev) => {
   if (imageData.width !== width || imageData.height !== height) {
     canvas.width = width; canvas.height = height;
     imageData = ctx.createImageData(width, height);
+    resizeDesktopCanvas();
   }
   const data = imageData.data;
   for (let i = 0; i < width * height; i++) {
