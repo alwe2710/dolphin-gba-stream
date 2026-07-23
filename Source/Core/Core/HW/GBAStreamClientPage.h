@@ -66,15 +66,25 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   canvas{image-rendering:pixelated;display:block;border:var(--border);border-radius:12px}
 
   /* ---------- Lobby: rounded "cartridge" tiles joined by a thin link-cable
-     line, referencing the physical GC-GBA link cable this feature emulates. ---------- */
-  #lobby{text-align:center;max-width:360px;padding:0 20px;box-sizing:border-box}
-  .lobby-brand{margin-bottom:22px}
+     line, referencing the physical GC-GBA link cable this feature emulates.
+     Fullscreen flex column: the heading sits near the top, and the picker
+     takes up the remaining space and centers itself within it, rather than
+     the two being centered together as one block. ---------- */
+  #lobby{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+         text-align:center;padding:24px 20px;padding-top:max(24px, env(safe-area-inset-top));
+         box-sizing:border-box;overflow-y:auto}
+  .lobby-brand{flex-shrink:0}
   .lobby-brand .mark{font-family:var(--font-display);font-weight:700;font-size:13px;
                       letter-spacing:0.08em;text-transform:uppercase;color:var(--accent)}
   .lobby-brand h1{font-family:var(--font-display);margin:6px 0 0;font-size:24px;
                   letter-spacing:-0.01em;text-wrap:balance}
   .lobby-brand p{margin:8px 0 0;font-size:13.5px;color:var(--muted)}
-  #lobbyButtons{display:flex;flex-direction:column;margin-top:8px;text-align:left}
+  #lobbyButtons{display:flex;flex-direction:column;flex:1;justify-content:center;
+                width:100%;max-width:420px;text-align:left}
+  /* Mobile: stretch the picker to (near) the full screen width instead of
+     the desktop's comfortably-capped column. */
+  body.mobile #lobby{padding-left:16px;padding-right:16px}
+  body.mobile #lobbyButtons{max-width:none}
   .slot{display:flex;align-items:center;gap:12px;width:100%;font:inherit;color:var(--ink);
         text-align:left;cursor:pointer;background:var(--surface);border:var(--border);
         border-radius:var(--radius);padding:12px 16px;margin:0 0 10px;position:relative}
@@ -254,6 +264,13 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 </div>
 </div>
 <script>
+// Any touch-capable device is treated as mobile: fullscreen video, on-screen
+// overlay instead of the keyboard-rebind panel, and the hamburger menu for
+// optional gamepad binding -- detected up front (not just once a slot is
+// picked) so the lobby screen itself can also adapt its layout.
+const isMobile = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isMobile) document.body.classList.add('mobile');
+
 const PLAYER_BASE_PORT = 6801;
 const lobbyEl = document.getElementById('lobby');
 const lobbyStatusEl = document.getElementById('lobbyStatus');
@@ -316,12 +333,6 @@ const BUTTONS = [
 ];
 const nameToBit = {};
 for (const [name, bit] of BUTTONS) nameToBit[name] = bit;
-
-// Any touch-capable device is treated as mobile: fullscreen video, on-screen
-// overlay instead of the keyboard-rebind panel, and the hamburger menu for
-// optional gamepad binding.
-const isMobile = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
-if (isMobile) document.body.classList.add('mobile');
 
 let keyState = 0;
 
