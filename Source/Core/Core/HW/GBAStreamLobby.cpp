@@ -82,6 +82,7 @@ private:
       sf::TcpSocket socket;
       if (m_listener.accept(socket) != sf::Socket::Status::Done)
         continue;
+      SetAbortiveClose(socket);
       HandleConnection(socket);
     }
   }

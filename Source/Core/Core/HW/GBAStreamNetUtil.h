@@ -10,6 +10,12 @@
 #include <cstddef>
 #include <thread>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
+
 #include <SFML/Network/TcpSocket.hpp>
 
 #include "Common/CommonTypes.h"
@@ -54,6 +60,53 @@ inline bool SendAllBytes(sf::TcpSocket& socket, const void* data, size_t size,
     return false;
   }
   return true;
+}
+
+namespace detail
+{
+// sf::Socket::getNativeHandle() is protected; this adds no members/behavior
+// of its own, just re-exposes it, so casting an existing sf::TcpSocket
+// reference to this type is safe (same object layout, no vtable changes).
+class TcpSocketHandleAccessor : public sf::TcpSocket
+{
+public:
+  static sf::SocketHandle Get(sf::TcpSocket& socket)
+  {
+    return static_cast<TcpSocketHandleAccessor&>(socket).getNativeHandle();
+  }
+};
+}  // namespace detail
+
+// Skips TCP's normal TIME_WAIT teardown for this connection by making its
+// eventual close send an immediate RST instead of a graceful FIN (SO_LINGER
+// with a zero timeout). Without this, once any client has connected, the
+// accepted connection's TIME_WAIT state (up to ~60s on Linux) blocks a new
+// listen() on this exact port even though nothing shows as LISTENing in
+// netstat/ss in the meantime, which otherwise made "stop, then immediately
+// restart" intermittently fail with a port that looks free but isn't yet.
+// Confirmed empirically that SO_REUSEADDR alone does *not* bypass this on
+// Linux; SO_LINGER's abortive close avoids TIME_WAIT from ever occurring at
+// all. Safe here: by the time any of our connections are torn down there's
+// nothing left worth delivering reliably -- either the peer already
+// disconnected, or Dolphin/the SI device is shutting down.
+inline void SetAbortiveClose(sf::TcpSocket& socket)
+{
+  const sf::SocketHandle handle = detail::TcpSocketHandleAccessor::Get(socket);
+#ifdef _WIN32
+  if (handle == INVALID_SOCKET)
+    return;
+#else
+  if (handle < 0)
+    return;
+#endif
+  linger lg{};
+  lg.l_onoff = 1;
+  lg.l_linger = 0;
+#ifdef _WIN32
+  setsockopt(handle, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&lg), sizeof(lg));
+#else
+  setsockopt(handle, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+#endif
 }
 
 }  // namespace HW::GBA

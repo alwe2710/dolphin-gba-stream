@@ -281,6 +281,7 @@ void GBAStreamHost::AcceptLoop()
     sf::TcpSocket socket;
     if (m_listener.accept(socket) != sf::Socket::Status::Done)
       continue;
+    SetAbortiveClose(socket);
     ServeConnection(socket);
   }
 }
