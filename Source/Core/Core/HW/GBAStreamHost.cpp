@@ -105,11 +105,22 @@ struct WebSocketFrame
 constexpr u8 kOpcodeBinary = 0x2;
 constexpr u8 kOpcodeClose = 0x8;
 
+// Our own client (GBAStreamClientPage.h) never sends anything bigger than a
+// 3-byte input message, so this is generous headroom, not a real limit -- it
+// exists purely so a malformed or hostile peer can't claim an absurd 64-bit
+// length. Without a cap, `pos + len` below (size_t arithmetic) can overflow
+// and wrap back into a small value, making the "is the full frame buffered
+// yet" check pass despite `buf` actually holding far fewer bytes than
+// claimed -- the unmasking loop then reads out of bounds, and even if it
+// didn't, `frame.payload.resize(len)` would attempt an unbounded allocation.
+constexpr u64 kMaxWebSocketFramePayload = 1 << 20;  // 1 MiB
+
 // Parses at most one client->server (masked) WebSocket frame from the front
 // of `buf`. Returns nullopt if `buf` doesn't yet contain a full frame -- the
 // caller should wait for more data and retry. Fragmented frames (FIN=0) are
 // not supported: our client never sends them, so treat one as a protocol
-// error (handled the same as a close frame by the caller).
+// error (handled the same as a close frame by the caller). An oversized
+// declared length is treated the same way (see kMaxWebSocketFramePayload).
 std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
 {
   if (buf.size() < 2)
@@ -137,6 +148,14 @@ std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
     for (int i = 0; i < 8; ++i)
       len = (len << 8) | buf[2 + i];
     pos = 10;
+  }
+
+  if (len > kMaxWebSocketFramePayload)
+  {
+    WebSocketFrame frame;
+    frame.opcode = kOpcodeClose;
+    frame.consumed = buf.size();
+    return frame;
   }
 
   std::array<u8, 4> mask_key{};

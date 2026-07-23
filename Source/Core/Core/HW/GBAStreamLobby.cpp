@@ -92,15 +92,31 @@ private:
     // This server only ever serves one static page regardless of request
     // path or method, so there's no need to actually parse the request --
     // just drain whatever the browser sends (bounded, so a slow/silent
-    // client can't stall the accept loop) and respond.
+    // client can't stall the accept loop) and respond. Every successful read
+    // is followed by another attempt instead of stopping right away: a real
+    // request (extra headers, cookies) can take more than one recv() to
+    // fully drain, and leaving any of it unread in the kernel's receive
+    // queue when this socket later closes makes Linux send an RST instead of
+    // a graceful FIN -- exactly the truncation-risk failure mode
+    // CloseGracefully() below exists to avoid. Once reads have gone quiet
+    // for a short grace period, the request is assumed fully buffered.
     std::array<char, 1024> buf{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    constexpr auto kQuietGrace = std::chrono::milliseconds(20);
+    auto quiet_since = std::chrono::steady_clock::now();
     while (!m_stop && std::chrono::steady_clock::now() < deadline)
     {
       size_t received = 0;
       const auto status = socket.receive(buf.data(), buf.size(), received);
+      if (status == sf::Socket::Status::Done)
+      {
+        quiet_since = std::chrono::steady_clock::now();
+        continue;
+      }
       if (status == sf::Socket::Status::NotReady)
       {
+        if (std::chrono::steady_clock::now() - quiet_since > kQuietGrace)
+          break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         continue;
       }
