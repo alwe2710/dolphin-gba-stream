@@ -395,6 +395,15 @@ ws.onopen = () => statusEl.textContent = 'connected';
 ws.onclose = () => statusEl.textContent = 'disconnected';
 ws.onerror = () => statusEl.textContent = 'error';
 
+// Bumped for every incoming video frame and captured before the (async)
+// decompression below. WebSocket message events are delivered in order, but
+// this handler awaits mid-frame, so two frames arriving close together can
+// finish decompressing out of order (e.g. one has more to inflate, or the
+// tab gets throttled in between). Painting a frame whose sequence number
+// isn't still the latest would draw a stale image over a newer one that
+// already rendered -- checked below, right before putImageData.
+let latestVideoSeq = 0;
+
 ws.onmessage = async (ev) => {
   const view = new DataView(ev.data);
   const type = view.getUint8(0);
@@ -406,12 +415,14 @@ ws.onmessage = async (ev) => {
     return;
   }
   if (type !== 1) return;
+  const seq = ++latestVideoSeq;
   const width = view.getUint32(1, true);
   const height = view.getUint32(5, true);
   const compressed = ev.data.slice(9);
   const raw = await new Response(
       new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
   ).arrayBuffer();
+  if (seq !== latestVideoSeq) return;  // A newer frame already arrived; this one is stale.
   const pixels = new DataView(raw);
   if (imageData.width !== width || imageData.height !== height) {
     canvas.width = width; canvas.height = height;
