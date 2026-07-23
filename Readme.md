@@ -8,6 +8,37 @@ of the GNU General Public License, version 2 or later (GPLv2+).
 
 Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
 
+## About this fork: GBA (Client-Stream)
+
+This fork adds **GBA (Client-Stream)**, a new controller device for GameCube
+ports that stream the integrated GBA emulation (the same core used for
+GC-GBA link-cable titles, e.g. *Four Swords Adventures*) to a separate
+device over the LAN, instead of showing it in a local window. The GBA
+emulation itself still runs on the Dolphin machine; only its video, audio,
+and button input travel over the network:
+
+- Pick a GameCube port in **Controllers &rarr; GameCube Controllers** and set
+  its device to **GBA (Client-Stream)**.
+- Boot a game that uses the integrated GBA. Any port configured this way
+  falls back to the normal local GBA pad binding whenever no client is
+  connected, so it behaves exactly like **GBA (Integrated)** until a client
+  attaches.
+- From another device on the same network (phone, tablet, another
+  computer), open `http://<dolphin-host-ip>:6800/` in a browser and pick a
+  free player slot. No app or installation needed on the client side.
+
+The web client is a single self-contained page with no build step and no
+external dependencies: fullscreen video sized to fit the window, an
+on-screen D-pad/button overlay on touch devices (with optional Xbox/
+PlayStation-style game controller binding via the Gamepad API), and a
+keyboard-rebind panel on desktop.
+
+This is LAN-only by design (no TLS, no authentication, no NAT traversal)
+and supports one connected client per player slot at a time. See the
+[latest release](https://github.com/alwe2710/dolphin-gba-stream/releases/latest)
+for a fuller rundown of what's included. Everything else in this README
+describes upstream Dolphin, which this fork otherwise tracks.
+
 ## System Requirements
 
 ### Desktop
