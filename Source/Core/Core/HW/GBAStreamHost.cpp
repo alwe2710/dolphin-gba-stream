@@ -50,23 +50,23 @@ namespace
 constexpr u32 GBA_STREAM_WIDTH = 240;
 constexpr u32 GBA_STREAM_HEIGHT = 160;
 
-constexpr u8 kMsgTypeVideoFrame = 0x01;
-constexpr u8 kMsgTypeInput = 0x02;
-constexpr u8 kMsgTypeAudio = 0x03;
+constexpr u8 MSG_TYPE_VIDEO_FRAME = 0x01;
+constexpr u8 MSG_TYPE_INPUT = 0x02;
+constexpr u8 MSG_TYPE_AUDIO = 0x03;
 
 // Remote key bitmask layout (client->server). Chosen to mirror the bit order
 // SI_DeviceGBAEmu::GetData() already uses for the internal GBA keypad word,
 // purely for readability -- this is our own wire protocol, not mGBA's ABI.
-constexpr u16 kKeyA = 1 << 0;
-constexpr u16 kKeyB = 1 << 1;
-constexpr u16 kKeySelect = 1 << 2;
-constexpr u16 kKeyStart = 1 << 3;
-constexpr u16 kKeyRight = 1 << 4;
-constexpr u16 kKeyLeft = 1 << 5;
-constexpr u16 kKeyUp = 1 << 6;
-constexpr u16 kKeyDown = 1 << 7;
-constexpr u16 kKeyR = 1 << 8;
-constexpr u16 kKeyL = 1 << 9;
+constexpr u16 KEY_A = 1 << 0;
+constexpr u16 KEY_B = 1 << 1;
+constexpr u16 KEY_SELECT = 1 << 2;
+constexpr u16 KEY_START = 1 << 3;
+constexpr u16 KEY_RIGHT = 1 << 4;
+constexpr u16 KEY_LEFT = 1 << 5;
+constexpr u16 KEY_UP = 1 << 6;
+constexpr u16 KEY_DOWN = 1 << 7;
+constexpr u16 KEY_R = 1 << 8;
+constexpr u16 KEY_L = 1 << 9;
 
 void AppendU32LE(std::vector<u8>* out, u32 value)
 {
@@ -103,8 +103,8 @@ struct WebSocketFrame
   size_t consumed;
 };
 
-constexpr u8 kOpcodeBinary = 0x2;
-constexpr u8 kOpcodeClose = 0x8;
+constexpr u8 OPCODE_BINARY = 0x2;
+constexpr u8 OPCODE_CLOSE = 0x8;
 
 // Our own client (GBAStreamClientPage.h) never sends anything bigger than a
 // 3-byte input message, so this is generous headroom, not a real limit -- it
@@ -114,14 +114,14 @@ constexpr u8 kOpcodeClose = 0x8;
 // yet" check pass despite `buf` actually holding far fewer bytes than
 // claimed -- the unmasking loop then reads out of bounds, and even if it
 // didn't, `frame.payload.resize(len)` would attempt an unbounded allocation.
-constexpr u64 kMaxWebSocketFramePayload = 1 << 20;  // 1 MiB
+constexpr u64 MAX_WEBSOCKET_FRAME_PAYLOAD = 1 << 20;  // 1 MiB
 
 // Parses at most one client->server (masked) WebSocket frame from the front
 // of `buf`. Returns nullopt if `buf` doesn't yet contain a full frame -- the
 // caller should wait for more data and retry. Fragmented frames (FIN=0) are
 // not supported: our client never sends them, so treat one as a protocol
 // error (handled the same as a close frame by the caller). An oversized
-// declared length is treated the same way (see kMaxWebSocketFramePayload).
+// declared length is treated the same way (see MAX_WEBSOCKET_FRAME_PAYLOAD).
 std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
 {
   if (buf.size() < 2)
@@ -151,10 +151,10 @@ std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
     pos = 10;
   }
 
-  if (len > kMaxWebSocketFramePayload)
+  if (len > MAX_WEBSOCKET_FRAME_PAYLOAD)
   {
     WebSocketFrame frame;
-    frame.opcode = kOpcodeClose;
+    frame.opcode = OPCODE_CLOSE;
     frame.consumed = buf.size();
     return frame;
   }
@@ -225,7 +225,7 @@ std::vector<int> GBAStreamHost::CheckPortsInUse()
     }
     any_stream_port_configured = true;
 
-    const auto port = static_cast<unsigned short>(kGBAStreamPlayerBasePort + device_number);
+    const auto port = static_cast<unsigned short>(GBA_STREAM_PLAYER_BASE_PORT + device_number);
     sf::TcpListener probe;
     if (probe.listen(port) != sf::Socket::Status::Done)
       busy_ports.push_back(port);
@@ -234,8 +234,8 @@ std::vector<int> GBAStreamHost::CheckPortsInUse()
   if (any_stream_port_configured)
   {
     sf::TcpListener probe;
-    if (probe.listen(kGBAStreamLobbyPort) != sf::Socket::Status::Done)
-      busy_ports.push_back(kGBAStreamLobbyPort);
+    if (probe.listen(GBA_STREAM_LOBBY_PORT) != sf::Socket::Status::Done)
+      busy_ports.push_back(GBA_STREAM_LOBBY_PORT);
   }
 
   return busy_ports;
@@ -248,7 +248,7 @@ GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
   // which port(s) those are.
   GBAStreamLobby::AddRef();
 
-  const auto port = static_cast<unsigned short>(kGBAStreamPlayerBasePort + device_number);
+  const auto port = static_cast<unsigned short>(GBA_STREAM_PLAYER_BASE_PORT + device_number);
   const auto status = m_listener.listen(port);
   if (status != sf::Socket::Status::Done)
   {
@@ -484,13 +484,13 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
           recv_buffer.erase(recv_buffer.begin(),
                             recv_buffer.begin() + static_cast<ptrdiff_t>(frame->consumed));
 
-          if (frame->opcode == kOpcodeClose)
+          if (frame->opcode == OPCODE_CLOSE)
           {
             disconnect_requested = true;
             break;
           }
-          if (frame->opcode == kOpcodeBinary && frame->payload.size() == 3 &&
-              frame->payload[0] == kMsgTypeInput)
+          if (frame->opcode == OPCODE_BINARY && frame->payload.size() == 3 &&
+              frame->payload[0] == MSG_TYPE_INPUT)
           {
             const u16 keys =
                 static_cast<u16>(frame->payload[1]) | (static_cast<u16>(frame->payload[2]) << 8);
@@ -550,7 +550,7 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
 
   std::vector<u8> message;
   message.reserve(9 + compressed.size());
-  message.push_back(kMsgTypeVideoFrame);
+  message.push_back(MSG_TYPE_VIDEO_FRAME);
   AppendU32LE(&message, width);
   AppendU32LE(&message, height);
   message.insert(message.end(), compressed.begin(), compressed.end());
@@ -574,7 +574,7 @@ void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& socket)
 
   std::vector<u8> message;
   message.reserve(6 + samples.size() * 2);
-  message.push_back(kMsgTypeAudio);
+  message.push_back(MSG_TYPE_AUDIO);
   AppendU32LE(&message, m_audio_sample_rate.load());
   message.push_back(static_cast<u8>(channels));
   for (const s16 sample : samples)
@@ -610,11 +610,11 @@ bool GBAStreamHost::ForwardAudioSamples(std::span<const s16> samples, u32 channe
     // enough to never trim during normal playback; if it's ever hit, the
     // oldest samples are dropped since a backlog that size is already
     // inaudibly stale.
-    constexpr size_t kMaxPendingSamples = 48000 * 2 * 2;
-    if (m_pending_audio.size() > kMaxPendingSamples)
+    constexpr size_t MAX_PENDING_SAMPLES = 48000 * 2 * 2;
+    if (m_pending_audio.size() > MAX_PENDING_SAMPLES)
     {
       m_pending_audio.erase(m_pending_audio.begin(),
-                            m_pending_audio.end() - static_cast<ptrdiff_t>(kMaxPendingSamples));
+                            m_pending_audio.end() - static_cast<ptrdiff_t>(MAX_PENDING_SAMPLES));
     }
   }
   return true;
@@ -626,18 +626,18 @@ void GBAStreamHost::AttachInputOverride()
   controller->SetInputOverrideFunction([this](std::string_view group, std::string_view control,
                                               ControlState state) -> std::optional<ControlState> {
     static constexpr std::array<std::pair<const char*, u16>, 6> buttons{{
-        {GBAPad::A_BUTTON, kKeyA},
-        {GBAPad::B_BUTTON, kKeyB},
-        {GBAPad::SELECT_BUTTON, kKeySelect},
-        {GBAPad::START_BUTTON, kKeyStart},
-        {GBAPad::L_BUTTON, kKeyL},
-        {GBAPad::R_BUTTON, kKeyR},
+        {GBAPad::A_BUTTON, KEY_A},
+        {GBAPad::B_BUTTON, KEY_B},
+        {GBAPad::SELECT_BUTTON, KEY_SELECT},
+        {GBAPad::START_BUTTON, KEY_START},
+        {GBAPad::L_BUTTON, KEY_L},
+        {GBAPad::R_BUTTON, KEY_R},
     }};
     static constexpr std::array<std::pair<const char*, u16>, 4> dpad{{
-        {DIRECTION_UP, kKeyUp},
-        {DIRECTION_DOWN, kKeyDown},
-        {DIRECTION_LEFT, kKeyLeft},
-        {DIRECTION_RIGHT, kKeyRight},
+        {DIRECTION_UP, KEY_UP},
+        {DIRECTION_DOWN, KEY_DOWN},
+        {DIRECTION_LEFT, KEY_LEFT},
+        {DIRECTION_RIGHT, KEY_RIGHT},
     }};
 
     if (!m_client_connected)

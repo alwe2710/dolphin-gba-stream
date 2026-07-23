@@ -44,11 +44,11 @@ public:
       return;
 
     m_stop = false;
-    const auto status = m_listener.listen(kGBAStreamLobbyPort);
+    const auto status = m_listener.listen(GBA_STREAM_LOBBY_PORT);
     if (status != sf::Socket::Status::Done)
     {
       ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamLobby: failed to listen on port {}",
-                    kGBAStreamLobbyPort);
+                    GBA_STREAM_LOBBY_PORT);
       return;
     }
     m_running = true;
@@ -102,7 +102,7 @@ private:
     // for a short grace period, the request is assumed fully buffered.
     std::array<char, 1024> buf{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
-    constexpr auto kQuietGrace = std::chrono::milliseconds(20);
+    constexpr auto QUIET_GRACE = std::chrono::milliseconds(20);
     auto quiet_since = std::chrono::steady_clock::now();
     while (!m_stop && std::chrono::steady_clock::now() < deadline)
     {
@@ -115,7 +115,7 @@ private:
       }
       if (status == sf::Socket::Status::NotReady)
       {
-        if (std::chrono::steady_clock::now() - quiet_since > kQuietGrace)
+        if (std::chrono::steady_clock::now() - quiet_since > QUIET_GRACE)
           break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         continue;
@@ -126,9 +126,9 @@ private:
     std::ostringstream response;
     response << "HTTP/1.1 200 OK\r\n"
              << "Content-Type: text/html; charset=utf-8\r\n"
-             << "Content-Length: " << kGBAStreamClientHtml.size() << "\r\n"
+             << "Content-Length: " << GBA_STREAM_CLIENT_HTML.size() << "\r\n"
              << "Connection: close\r\n\r\n"
-             << kGBAStreamClientHtml;
+             << GBA_STREAM_CLIENT_HTML;
     const std::string response_str = response.str();
     if (SendAllBytes(socket, response_str.data(), response_str.size(), m_stop))
       CloseGracefully(socket, m_stop);

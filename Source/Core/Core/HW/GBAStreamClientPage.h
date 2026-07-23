@@ -34,7 +34,7 @@ namespace HW::GBA
 // accent used only for the primary/active affordance (the A button, primary
 // actions) so it doesn't compete with itself. Chosen from a set of three
 // design proposals shown to and picked by the project owner.
-inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
+inline constexpr std::string_view GBA_STREAM_CLIENT_HTML = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Dolphin GBA Stream</title>

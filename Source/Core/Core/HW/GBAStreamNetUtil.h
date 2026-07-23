@@ -28,8 +28,8 @@ namespace HW::GBA
 // (Client-Stream) (GBAStreamHost, device_number 0-3 -> base port +
 // device_number). Shared so GBAStreamHost::CheckPortsInUse() can pre-flight
 // exactly the same addresses the real servers will later try to bind.
-constexpr unsigned short kGBAStreamLobbyPort = 6800;
-constexpr unsigned short kGBAStreamPlayerBasePort = 6801;
+constexpr unsigned short GBA_STREAM_LOBBY_PORT = 6800;
+constexpr unsigned short GBA_STREAM_PLAYER_BASE_PORT = 6801;
 
 // Sends `size` bytes on a non-blocking socket, retrying on NotReady. Bounds
 // every wait to a short sleep so a stalled/frozen peer (e.g. a crashed
