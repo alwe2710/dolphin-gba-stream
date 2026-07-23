@@ -35,7 +35,9 @@ namespace HW::GBA
 // actions) so it doesn't compete with itself. Chosen from a set of three
 // design proposals shown to and picked by the project owner.
 inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
-<html><head><meta charset="utf-8"><title>Dolphin GBA Stream</title>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Dolphin GBA Stream</title>
 <style>
   :root{
     --bg:#241b2f;--surface:#33253f;--surface-2:#3e2d4d;
