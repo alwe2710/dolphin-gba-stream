@@ -27,20 +27,58 @@ namespace HW::GBA
 // panel is hidden, and a small centered hamburger button opens a menu for
 // binding a connected game controller (Gamepad API) and for hiding the
 // overlay for players who'd rather use a controller alone.
+//
+// Visual language ("Handheld Link"): a warm dark plum theme referencing the
+// GC-GBA link cable this feature emulates -- rounded "cartridge" tiles for
+// the player picker, joined by a thin connecting line, and a periwinkle
+// accent used only for the primary/active affordance (the A button, primary
+// actions) so it doesn't compete with itself. Chosen from a set of three
+// design proposals shown to and picked by the project owner.
 inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><title>Dolphin GBA Stream</title>
 <style>
-  html,body{margin:0;background:#111;color:#ddd;font-family:sans-serif;height:100%;
-            display:flex;flex-direction:column;align-items:center;justify-content:center;
-            overscroll-behavior:none}
-  canvas{image-rendering:pixelated;width:min(96vw,720px);height:auto;border:1px solid #444}
-  #status{margin:8px;font-size:14px}
-  #settings{margin-top:8px;font-size:13px}
-  #settings button{margin:2px;min-width:80px}
+  :root{
+    --bg:#241b2f;--surface:#33253f;--surface-2:#3e2d4d;
+    --ink:#f7eefc;--muted:#b79fc7;--accent:#7c5cff;--accent-ink:#fbfaff;
+    --ok:#7be0b0;--radius:14px;
+    --font-display:"Trebuchet MS","Century Gothic",system-ui,sans-serif;
+    --font-body:system-ui,"Segoe UI",sans-serif;
+    --border:1px solid rgba(255,255,255,0.12);
+  }
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);
+            height:100%;display:flex;flex-direction:column;align-items:center;
+            justify-content:center;overscroll-behavior:none}
+  canvas{image-rendering:pixelated;width:min(96vw,720px);height:auto;
+         border:var(--border);border-radius:12px}
+  #status{margin:8px;font-size:13px;color:var(--muted)}
   #game{display:none;flex-direction:column;align-items:center;width:100%}
-  #lobbyButtons{display:flex;gap:10px;margin-top:12px}
-  #lobbyButtons button{font-size:20px;min-width:64px;min-height:64px;cursor:pointer}
-  #lobbyButtons button:disabled{opacity:0.35;cursor:not-allowed}
+
+  /* ---------- Lobby: rounded "cartridge" tiles joined by a thin link-cable
+     line, referencing the physical GC-GBA link cable this feature emulates. ---------- */
+  #lobby{text-align:center;max-width:360px;padding:0 20px;box-sizing:border-box}
+  .lobby-brand{margin-bottom:22px}
+  .lobby-brand .mark{font-family:var(--font-display);font-weight:700;font-size:13px;
+                      letter-spacing:0.08em;text-transform:uppercase;color:var(--accent)}
+  .lobby-brand h1{font-family:var(--font-display);margin:6px 0 0;font-size:24px;
+                  letter-spacing:-0.01em;text-wrap:balance}
+  .lobby-brand p{margin:8px 0 0;font-size:13.5px;color:var(--muted)}
+  #lobbyButtons{display:flex;flex-direction:column;margin-top:8px;text-align:left}
+  .slot{display:flex;align-items:center;gap:12px;width:100%;font:inherit;color:var(--ink);
+        text-align:left;cursor:pointer;background:var(--surface);border:var(--border);
+        border-radius:var(--radius);padding:12px 16px;margin:0 0 10px;position:relative}
+  .slot:not(:last-child)::after{content:"";position:absolute;left:31px;bottom:-10px;
+                                width:2px;height:10px;
+                                background:linear-gradient(var(--accent),transparent)}
+  .slot .tag{width:38px;height:38px;border-radius:12px;flex-shrink:0;display:flex;
+            align-items:center;justify-content:center;font-family:var(--font-display);
+            font-weight:700;font-size:14px;background:var(--accent);color:var(--accent-ink)}
+  .slot:disabled .tag{background:var(--surface-2);color:var(--muted)}
+  .slot .info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+  .slot .name{font-size:14px;font-weight:600}
+  .slot .sub{font-size:11.5px;color:var(--muted)}
+  .slot .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex-shrink:0}
+  .slot:disabled .dot{background:var(--muted)}
+  .slot:disabled{cursor:not-allowed;opacity:0.7}
 
   /* Mobile: fullscreen video with the D-pad/buttons drawn on top of it,
      like a typical mobile emulator, instead of the desktop's bordered,
@@ -48,10 +86,10 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   body.mobile{overflow:hidden}
   body.mobile #game{position:fixed;inset:0;width:100vw;height:100vh;background:#000}
   body.mobile canvas{position:absolute;top:0;left:0;width:100%;height:100%;
-                      object-fit:contain;border:none}
+                      object-fit:contain;border:none;border-radius:0}
   body.mobile #settings{display:none}
   body.mobile #status{position:fixed;top:6px;left:6px;margin:0;z-index:5;font-size:11px;
-                       background:rgba(0,0,0,0.4);padding:2px 6px;border-radius:4px}
+                       background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:20px}
 
   /* Absolutely positioned within the fixed full-viewport container, laid out
      like a typical mobile emulator: shoulder buttons in the top corners,
@@ -59,45 +97,81 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
      buttons bottom-right -- keeps the bottom-right cluster narrow enough to
      never overflow off-screen on narrow phones, unlike a single wide row. */
   #touchControls{position:fixed;inset:0;display:none;pointer-events:none;z-index:10}
-  .tshoulder{position:absolute;top:14px;width:56px;height:40px;font-size:14px}
+  .tshoulder{position:absolute;top:14px;width:52px;height:36px;font-size:13px}
   #touchL{left:14px}
   #touchR{right:14px}
   #touchDpad{position:absolute;left:20px;bottom:24px;
-             display:grid;grid-template-columns:repeat(3, 52px);grid-template-rows:repeat(3, 52px);
+             display:grid;grid-template-columns:repeat(3, 48px);grid-template-rows:repeat(3, 48px);
              grid-template-areas:". u ." "l . r" ". d ."}
   #touchRight{position:absolute;right:20px;bottom:24px;
               display:flex;flex-direction:column;align-items:flex-end;gap:12px}
   #touchStartSelect{display:flex;gap:8px}
   /* A (last child) sits higher than B, like the real GBA's staggered layout. */
-  #touchAB{display:flex;align-items:flex-end;gap:8px}
+  #touchAB{display:flex;align-items:flex-end;gap:10px}
   #touchAB button:last-child{margin-bottom:20px}
-  .tbtn{font-size:16px;border-radius:8px;border:1px solid rgba(255,255,255,0.5);
-        background:rgba(255,255,255,0.15);color:#fff;user-select:none;
+  .tbtn{font-family:var(--font-display);font-weight:600;font-size:15px;border-radius:var(--radius);
+        border:var(--border);background:var(--surface);color:var(--ink);user-select:none;
         -webkit-user-select:none;touch-action:none;pointer-events:auto}
-  .tbtn.round{border-radius:50%;width:52px;height:52px}
-  .tbtn.big{width:64px;height:64px;font-size:20px}
-  .tbtn.small{width:48px;height:32px;font-size:11px;border-radius:6px}
+  .tbtn.round{border-radius:50%;width:48px;height:48px}
+  .tbtn.big{width:60px;height:60px;font-size:19px}
+  .tbtn.small{width:44px;height:30px;font-size:10.5px;border-radius:999px}
   /* Darkened while held, so a press is visually obvious with no haptic
      feedback to rely on. */
-  .tbtn.pressed{background:rgba(0,0,0,0.55)}
+  .tbtn.pressed{background:var(--surface-2)}
+  /* A is the primary action, so it alone carries the accent -- a soft glow
+     rather than the flat swap the other buttons get when pressed. */
+  [data-name="A"].tbtn{background:var(--accent);color:var(--accent-ink);border-color:transparent;
+                        box-shadow:0 0 0 5px rgba(124,92,255,0.25)}
+  [data-name="A"].tbtn.pressed{box-shadow:0 0 0 3px rgba(124,92,255,0.4)}
 
   #menuButton{display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);
-              width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,0.45);
-              color:#fff;border:1px solid rgba(255,255,255,0.5);font-size:20px;
+              width:44px;height:44px;border-radius:50%;background:rgba(20,15,26,0.7);
+              color:var(--ink);border:var(--border);font-size:18px;
               padding:0;z-index:20;align-items:center;justify-content:center}
   /* justify-content:flex-start (not center) so a panel taller than the
      viewport in landscape scrolls from the top instead of centering and
      clipping its first item above the visible area. */
-  #menuPanel{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.9);color:#fff;
-             z-index:30;flex-direction:column;align-items:center;justify-content:flex-start;
-             gap:8px;padding:16px;padding-top:max(16px, env(safe-area-inset-top));
+  #menuPanel{display:none;position:fixed;inset:0;background:rgba(20,15,26,0.94);color:var(--ink);
+             font-family:var(--font-body);z-index:30;flex-direction:column;align-items:center;
+             justify-content:flex-start;gap:10px;padding:20px 18px;
+             padding-top:max(20px, env(safe-area-inset-top));
              box-sizing:border-box;overflow-y:auto;text-align:center}
-  #menuPanel button{margin:2px;min-width:100px}
-  #gamepadBindingsList{display:flex;flex-direction:column;gap:4px;margin:8px 0}
+  #menuPanel h3{font-family:var(--font-display);margin:4px 0 4px;font-size:18px}
+  .menu-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;
+              margin-top:8px}
+  .menu-row{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;
+            max-width:320px;background:var(--surface);border:var(--border);
+            border-radius:var(--radius);padding:10px 14px;font-size:13px;box-sizing:border-box;
+            cursor:default}
+  #gamepadBindingsList{display:flex;flex-direction:column;gap:8px;width:100%;align-items:center}
+  #gamepadBindingsList .hint{font-size:12px;color:var(--muted);max-width:280px}
+  .pill{font-family:var(--font-body);font-size:11.5px;font-weight:700;border:none;cursor:pointer;
+        padding:7px 14px;border-radius:999px;background:var(--accent);color:var(--accent-ink)}
+  input.switch{appearance:none;-webkit-appearance:none;width:34px;height:20px;border-radius:999px;
+               background:var(--surface-2);position:relative;cursor:pointer;margin:0;
+               flex-shrink:0}
+  input.switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+                      border-radius:50%;background:var(--muted)}
+  input.switch:checked::after{left:16px;background:var(--accent)}
+  #closeMenu{margin-top:10px;background:transparent;border:var(--border);color:var(--muted);
+             font-family:var(--font-body);font-size:12.5px;font-weight:600;
+             padding:9px 20px;border-radius:999px;cursor:pointer}
+
+  /* ---------- Desktop keyboard-rebind panel ---------- */
+  #settings{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;
+            max-width:640px}
+  #settings button{font-family:var(--font-body);font-size:12.5px;font-weight:600;
+                   background:var(--surface);border:var(--border);color:var(--ink);
+                   padding:8px 14px;border-radius:999px;cursor:pointer;min-width:90px}
+  #settings button:hover{border-color:var(--accent)}
 </style></head>
 <body>
 <div id="lobby">
-  <div id="lobbyStatus">Suche nach aktiven GBA-Slots...</div>
+  <div class="lobby-brand">
+    <div class="mark">Link Cable</div>
+    <h1>Wer spielt mit?</h1>
+    <p id="lobbyStatus">Suche nach aktiven GBA-Slots...</p>
+  </div>
   <div id="lobbyButtons"></div>
 </div>
 <div id="game">
@@ -109,8 +183,8 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   <button class="tbtn tshoulder" id="touchR" data-name="R">R</button>
   <div id="touchDpad">
     <button class="tbtn" data-name="Up" style="grid-area:u">▲</button>
-    <button class="tbtn" data-name="Left" style="grid-area:l">◀</button>
-    <button class="tbtn" data-name="Right" style="grid-area:r">▶</button>
+    <button class="tbtn" data-name="Left" style="grid-area:l">◀︎</button>
+    <button class="tbtn" data-name="Right" style="grid-area:r">▶︎</button>
     <button class="tbtn" data-name="Down" style="grid-area:d">▼</button>
   </div>
   <div id="touchRight">
@@ -126,11 +200,12 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 </div>
 <button id="menuButton">&#9776;</button>
 <div id="menuPanel">
-  <h3 style="margin:0">Menü</h3>
-  <div>
-    <label><input type="checkbox" id="toggleOverlay"> Touch-Overlay anzeigen</label>
-  </div>
-  <div>Gamecontroller-Belegung:</div>
+  <h3>Menü</h3>
+  <label class="menu-row" for="toggleOverlay">
+    <span>Touch-Overlay anzeigen</span>
+    <input type="checkbox" class="switch" id="toggleOverlay">
+  </label>
+  <div class="menu-label">Gamecontroller-Belegung</div>
   <div id="gamepadBindingsList"></div>
   <button id="closeMenu">Schließen</button>
 </div>
@@ -166,14 +241,21 @@ async function buildLobby() {
   results.forEach((r, i) => {
     if (!r.exists) return;
     anyExists = true;
+    const port = PLAYER_BASE_PORT + i;
     const btn = document.createElement('button');
-    btn.textContent = 'P' + (i + 1);
+    btn.className = 'slot';
     btn.disabled = r.occupied;
     btn.title = r.occupied ? 'Bereits verbunden' : 'Verbinden';
+    btn.innerHTML =
+        '<span class="tag">P' + (i + 1) + '</span>' +
+        '<span class="info"><span class="name">Port ' + (i + 1) + ' · ' +
+        (r.occupied ? 'belegt' : 'frei') + '</span>' +
+        '<span class="sub">ws · ' + port + '</span></span>' +
+        '<span class="dot"></span>';
     btn.onclick = () => {
       lobbyEl.style.display = 'none';
       gameEl.style.display = 'flex';
-      startStream(PLAYER_BASE_PORT + i);
+      startStream(port);
     };
     lobbyButtonsEl.appendChild(btn);
   });
@@ -404,16 +486,19 @@ if (isMobile) {
     gamepadListEl.innerHTML = '';
     if (activeGamepadIndex === null) {
       const hint = document.createElement('div');
+      hint.className = 'hint';
       hint.textContent = 'Kein Controller erkannt -- bitte verbinden und einen Knopf drücken.';
       gamepadListEl.appendChild(hint);
     }
     for (const [name] of BUTTONS) {
       const row = document.createElement('div');
+      row.className = 'menu-row';
       const label = document.createElement('span');
       label.textContent = name + ': ' +
           (gamepadBindings[name] !== undefined ? ('Knopf ' + gamepadBindings[name]) :
-                                                  'nicht belegt') + '  ';
+                                                  'nicht belegt');
       const btn = document.createElement('button');
+      btn.className = 'pill';
       btn.textContent = 'Belegen';
       btn.onclick = () => {
         btn.textContent = 'Drücke einen Knopf...';
