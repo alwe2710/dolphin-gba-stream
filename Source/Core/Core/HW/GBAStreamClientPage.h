@@ -71,7 +71,7 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
      takes up the remaining space and centers itself within it, rather than
      the two being centered together as one block. ---------- */
   #lobby{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
-         text-align:center;padding:24px 20px;padding-top:max(24px, env(safe-area-inset-top));
+         text-align:center;padding:24px 20px;padding-top:max(72px, env(safe-area-inset-top));
          box-sizing:border-box;overflow-y:auto}
   .lobby-brand{flex-shrink:0}
   .lobby-brand .mark{font-family:var(--font-display);font-weight:700;font-size:13px;
