@@ -48,7 +48,7 @@ public:
     if (status != sf::Socket::Status::Done)
     {
       ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamLobby: failed to listen on port {}",
-                   kGBAStreamLobbyPort);
+                    kGBAStreamLobbyPort);
       return;
     }
     m_running = true;

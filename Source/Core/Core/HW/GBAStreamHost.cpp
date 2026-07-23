@@ -354,8 +354,9 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
     std::getline(stream, request_line);
     {
       const auto first_space = request_line.find(' ');
-      const auto second_space =
-          first_space == std::string::npos ? std::string::npos : request_line.find(' ', first_space + 1);
+      const auto second_space = first_space == std::string::npos ?
+                                    std::string::npos :
+                                    request_line.find(' ', first_space + 1);
       if (first_space != std::string::npos && second_space != std::string::npos)
         path = request_line.substr(first_space + 1, second_space - first_space - 1);
     }
@@ -372,7 +373,7 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
       while (!value.empty() && (value.back() == '\r' || value.back() == '\n'))
         value.pop_back();
       std::transform(key.begin(), key.end(), key.begin(),
-                      [](unsigned char c) { return std::tolower(c); });
+                     [](unsigned char c) { return std::tolower(c); });
       headers[key] = value;
     }
   }
@@ -423,8 +424,8 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
     return true;
   }
 
-  const std::string concatenated = headers["sec-websocket-key"] +
-                                    "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  const std::string concatenated =
+      headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
   const auto digest = Common::SHA1::CalculateDigest(concatenated);
   std::array<unsigned char, 64> b64{};
   size_t b64_len = 0;
@@ -475,7 +476,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
         recv_buffer.insert(recv_buffer.end(), read_buf.begin(), read_buf.begin() + received);
 
         bool disconnect_requested = false;
-        for (;;)
+        while (true)
         {
           const auto frame = TryParseWebSocketFrame(recv_buffer);
           if (!frame)
@@ -491,8 +492,8 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
           if (frame->opcode == kOpcodeBinary && frame->payload.size() == 3 &&
               frame->payload[0] == kMsgTypeInput)
           {
-            const u16 keys = static_cast<u16>(frame->payload[1]) |
-                             (static_cast<u16>(frame->payload[2]) << 8);
+            const u16 keys =
+                static_cast<u16>(frame->payload[1]) | (static_cast<u16>(frame->payload[2]) << 8);
             m_remote_keys.store(keys);
           }
         }
@@ -622,43 +623,42 @@ bool GBAStreamHost::ForwardAudioSamples(std::span<const s16> samples, u32 channe
 void GBAStreamHost::AttachInputOverride()
 {
   auto* controller = Pad::GetGBAConfig()->GetController(m_device_number);
-  controller->SetInputOverrideFunction(
-      [this](std::string_view group, std::string_view control,
-             ControlState state) -> std::optional<ControlState> {
-        static constexpr std::array<std::pair<const char*, u16>, 6> buttons{{
-            {GBAPad::A_BUTTON, kKeyA},
-            {GBAPad::B_BUTTON, kKeyB},
-            {GBAPad::SELECT_BUTTON, kKeySelect},
-            {GBAPad::START_BUTTON, kKeyStart},
-            {GBAPad::L_BUTTON, kKeyL},
-            {GBAPad::R_BUTTON, kKeyR},
-        }};
-        static constexpr std::array<std::pair<const char*, u16>, 4> dpad{{
-            {DIRECTION_UP, kKeyUp},
-            {DIRECTION_DOWN, kKeyDown},
-            {DIRECTION_LEFT, kKeyLeft},
-            {DIRECTION_RIGHT, kKeyRight},
-        }};
+  controller->SetInputOverrideFunction([this](std::string_view group, std::string_view control,
+                                              ControlState state) -> std::optional<ControlState> {
+    static constexpr std::array<std::pair<const char*, u16>, 6> buttons{{
+        {GBAPad::A_BUTTON, kKeyA},
+        {GBAPad::B_BUTTON, kKeyB},
+        {GBAPad::SELECT_BUTTON, kKeySelect},
+        {GBAPad::START_BUTTON, kKeyStart},
+        {GBAPad::L_BUTTON, kKeyL},
+        {GBAPad::R_BUTTON, kKeyR},
+    }};
+    static constexpr std::array<std::pair<const char*, u16>, 4> dpad{{
+        {DIRECTION_UP, kKeyUp},
+        {DIRECTION_DOWN, kKeyDown},
+        {DIRECTION_LEFT, kKeyLeft},
+        {DIRECTION_RIGHT, kKeyRight},
+    }};
 
-        if (!m_client_connected)
-          return std::nullopt;
+    if (!m_client_connected)
+      return std::nullopt;
 
-        const u16 keys = m_remote_keys.load();
-        if (group == GBAPad::BUTTONS_GROUP)
-        {
-          for (const auto& [name, bit] : buttons)
-            if (control == name)
-              return (keys & bit) ? 1.0 : 0.0;
-        }
-        else if (group == GBAPad::DPAD_GROUP)
-        {
-          for (const auto& [name, bit] : dpad)
-            if (control == name)
-              return (keys & bit) ? 1.0 : 0.0;
-        }
-        (void)state;
-        return std::nullopt;
-      });
+    const u16 keys = m_remote_keys.load();
+    if (group == GBAPad::BUTTONS_GROUP)
+    {
+      for (const auto& [name, bit] : buttons)
+        if (control == name)
+          return (keys & bit) ? 1.0 : 0.0;
+    }
+    else if (group == GBAPad::DPAD_GROUP)
+    {
+      for (const auto& [name, bit] : dpad)
+        if (control == name)
+          return (keys & bit) ? 1.0 : 0.0;
+    }
+    (void)state;
+    return std::nullopt;
+  });
 }
 
 void GBAStreamHost::DetachInputOverride()
