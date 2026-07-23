@@ -34,6 +34,7 @@
 #include "Core/HW/GBAPadEmu.h"
 #include "Core/HW/GBAStreamLobby.h"
 #include "Core/HW/GBAStreamNetUtil.h"
+#include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
 
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
@@ -215,7 +216,7 @@ std::vector<int> GBAStreamHost::CheckPortsInUse()
   std::vector<int> busy_ports;
   bool any_stream_port_configured = false;
 
-  for (int device_number = 0; device_number < 4; ++device_number)
+  for (int device_number = 0; device_number < SerialInterface::MAX_SI_CHANNELS; ++device_number)
   {
     if (Config::Get(Config::GetInfoForSIDevice(device_number)) !=
         SerialInterface::SIDEVICE_GC_GBA_STREAM)
