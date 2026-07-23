@@ -5,6 +5,7 @@
 
 #ifdef HAS_LIBMGBA
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -77,18 +78,14 @@ public:
 };
 }  // namespace detail
 
-// Skips TCP's normal TIME_WAIT teardown for this connection by making its
-// eventual close send an immediate RST instead of a graceful FIN (SO_LINGER
-// with a zero timeout). Without this, once any client has connected, the
-// accepted connection's TIME_WAIT state (up to ~60s on Linux) blocks a new
-// listen() on this exact port even though nothing shows as LISTENing in
-// netstat/ss in the meantime, which otherwise made "stop, then immediately
-// restart" intermittently fail with a port that looks free but isn't yet.
-// Confirmed empirically that SO_REUSEADDR alone does *not* bypass this on
-// Linux; SO_LINGER's abortive close avoids TIME_WAIT from ever occurring at
-// all. Safe here: by the time any of our connections are torn down there's
-// nothing left worth delivering reliably -- either the peer already
-// disconnected, or Dolphin/the SI device is shutting down.
+// Makes this socket's eventual close send an immediate RST instead of a
+// graceful FIN (SO_LINGER with a zero timeout), which skips TCP's TIME_WAIT
+// teardown entirely instead of leaving it to the usual ~60s. Only safe to
+// call once nothing more is going to be sent on this socket AND either the
+// peer has already seen everything we wrote or we no longer care --
+// otherwise data still sitting in the kernel's send buffer at the moment of
+// close can be discarded, truncating whatever we just sent. Use
+// CloseGracefully() below rather than calling this directly.
 inline void SetAbortiveClose(sf::TcpSocket& socket)
 {
   const sf::SocketHandle handle = detail::TcpSocketHandleAccessor::Get(socket);
@@ -107,6 +104,41 @@ inline void SetAbortiveClose(sf::TcpSocket& socket)
 #else
   setsockopt(handle, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
 #endif
+}
+
+// Called right before a socket goes out of scope, once we're done sending on
+// it. Prefers to let the *peer* send the first FIN -- once they've read
+// everything we wrote, their browser/OS closes its end, which makes them the
+// TCP "active closer" and puts TIME_WAIT on their side, not ours, with zero
+// risk of truncating data we just sent. Only if the peer doesn't close
+// within a short, generous grace period (they may just be slow, or gone
+// without a trace) do we fall back to SetAbortiveClose() -- by then anything
+// we wrote has long since either been delivered or given up on, so an
+// abortive close is no longer a truncation risk, just a bounded worst case
+// so this never hangs shutdown.
+//
+// This -- not an unconditional SetAbortiveClose() at accept time -- is what
+// actually fixed a port intermittently refusing to rebind after a quick
+// Dolphin restart: that bug came from *us* always being the active closer
+// (we write a one-shot HTTP response, then immediately destruct the
+// socket), which is exactly the scenario SetAbortiveClose() alone isn't
+// safe to use for.
+inline void CloseGracefully(sf::TcpSocket& socket, const std::atomic_bool& stop_flag)
+{
+  socket.setBlocking(false);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  std::array<char, 256> buf{};
+  while (!stop_flag && std::chrono::steady_clock::now() < deadline)
+  {
+    size_t received = 0;
+    const auto status = socket.receive(buf.data(), buf.size(), received);
+    if (status == sf::Socket::Status::Disconnected)
+      return;  // Peer closed first -- nothing more to do, no TIME_WAIT for us.
+    if (status != sf::Socket::Status::NotReady)
+      return;  // Error, or unexpectedly received more data -- give up cleanly.
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  SetAbortiveClose(socket);
 }
 
 }  // namespace HW::GBA

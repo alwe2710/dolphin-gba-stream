@@ -82,7 +82,6 @@ private:
       sf::TcpSocket socket;
       if (m_listener.accept(socket) != sf::Socket::Status::Done)
         continue;
-      SetAbortiveClose(socket);
       HandleConnection(socket);
     }
   }
@@ -115,7 +114,8 @@ private:
              << "Connection: close\r\n\r\n"
              << kGBAStreamClientHtml;
     const std::string response_str = response.str();
-    SendAllBytes(socket, response_str.data(), response_str.size(), m_stop);
+    if (SendAllBytes(socket, response_str.data(), response_str.size(), m_stop))
+      CloseGracefully(socket, m_stop);
   }
 
   std::mutex m_mutex;

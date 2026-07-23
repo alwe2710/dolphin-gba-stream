@@ -281,7 +281,6 @@ void GBAStreamHost::AcceptLoop()
     sf::TcpSocket socket;
     if (m_listener.accept(socket) != sf::Socket::Status::Done)
       continue;
-    SetAbortiveClose(socket);
     ServeConnection(socket);
   }
 }
@@ -379,7 +378,8 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
              << "Connection: close\r\n\r\n"
              << body;
     const std::string response_str = response.str();
-    SendAllBytes(socket, response_str.data(), response_str.size(), m_stop);
+    if (SendAllBytes(socket, response_str.data(), response_str.size(), m_stop))
+      CloseGracefully(socket, m_stop);
     return true;
   }
 
@@ -398,7 +398,8 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
              << "Location: http://" << host << ":6800/\r\n"
              << "Connection: close\r\n\r\n";
     const std::string response_str = response.str();
-    SendAllBytes(socket, response_str.data(), response_str.size(), m_stop);
+    if (SendAllBytes(socket, response_str.data(), response_str.size(), m_stop))
+      CloseGracefully(socket, m_stop);
     return true;
   }
 
@@ -484,6 +485,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
     SendAudioIfPending(socket);
   }
 
+  CloseGracefully(socket, m_stop);
   m_client_connected = false;
   m_remote_keys = 0;
 }
