@@ -87,7 +87,6 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
   body.mobile #game{position:fixed;inset:0;width:100vw;height:100vh;background:#000}
   body.mobile canvas{position:absolute;top:0;left:0;width:100%;height:100%;
                       object-fit:contain;border:none;border-radius:0}
-  body.mobile #settings{display:none}
   body.mobile #status{position:fixed;top:6px;left:6px;margin:0;z-index:5;font-size:11px;
                        background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:20px}
 
@@ -157,13 +156,33 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
              font-family:var(--font-body);font-size:12.5px;font-weight:600;
              padding:9px 20px;border-radius:999px;cursor:pointer}
 
-  /* ---------- Desktop keyboard-rebind panel ---------- */
-  #settings{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;
-            max-width:640px}
-  #settings button{font-family:var(--font-body);font-size:12.5px;font-weight:600;
-                   background:var(--surface);border:var(--border);color:var(--ink);
-                   padding:8px 14px;border-radius:999px;cursor:pointer;min-width:90px}
-  #settings button:hover{border-color:var(--accent)}
+  /* ---------- Desktop keyboard-rebind: a gear button bottom-right opens a
+     table of button->key assignments, mirroring the mobile hamburger menu's
+     role but as a table since there's no touch overlay to keep in view. ---------- */
+  #settingsButton{display:none;position:fixed;right:16px;bottom:16px;
+                  width:42px;height:42px;border-radius:50%;background:var(--surface);
+                  color:var(--ink);border:var(--border);font-size:18px;
+                  padding:0;z-index:20;align-items:center;justify-content:center;cursor:pointer}
+  body.mobile #settingsButton{display:none !important}
+  #settingsPanel{display:none;position:fixed;inset:0;background:rgba(20,15,26,0.85);
+                 color:var(--ink);font-family:var(--font-body);z-index:30;
+                 flex-direction:column;align-items:center;justify-content:center;
+                 gap:14px;padding:20px;box-sizing:border-box}
+  #settingsPanel h3{font-family:var(--font-display);margin:0;font-size:19px}
+  #settingsTable{border-collapse:collapse;background:var(--surface);border:var(--border);
+                 border-radius:var(--radius);overflow:hidden;font-size:13.5px}
+  #settingsTable th,#settingsTable td{padding:9px 16px;text-align:left}
+  #settingsTable th{color:var(--muted);font-size:11px;text-transform:uppercase;
+                    letter-spacing:0.05em;font-weight:600;border-bottom:var(--border)}
+  #settingsTable tr:not(:last-child) td{border-bottom:1px solid rgba(255,255,255,0.06)}
+  #settingsTable td:first-child{font-weight:600}
+  #settingsTable td:nth-child(2){color:var(--muted);font-variant-numeric:tabular-nums}
+  #settingsTable button{font-family:var(--font-body);font-size:11.5px;font-weight:700;
+                        border:none;cursor:pointer;padding:6px 12px;border-radius:999px;
+                        background:var(--accent);color:var(--accent-ink)}
+  #closeSettings{background:transparent;border:var(--border);color:var(--muted);
+                 font-family:var(--font-body);font-size:12.5px;font-weight:600;
+                 padding:9px 20px;border-radius:999px;cursor:pointer}
 </style></head>
 <body>
 <div id="lobby">
@@ -177,7 +196,15 @@ inline constexpr std::string_view kGBAStreamClientHtml = R"HTML(<!doctype html>
 <div id="game">
 <div id="status">connecting...</div>
 <canvas id="screen" width="240" height="160"></canvas>
-<div id="settings"></div>
+<button id="settingsButton" title="Tastenbelegung">&#9881;</button>
+<div id="settingsPanel">
+  <h3>Tastenbelegung</h3>
+  <table id="settingsTable">
+    <thead><tr><th>Taste</th><th>Belegung</th><th></th></tr></thead>
+    <tbody id="settingsTableBody"></tbody>
+  </table>
+  <button id="closeSettings">Schließen</button>
+</div>
 <div id="touchControls">
   <button class="tbtn tshoulder" id="touchL" data-name="L">L</button>
   <button class="tbtn tshoulder" id="touchR" data-name="R">R</button>
@@ -518,17 +545,26 @@ if (isMobile) {
   document.getElementById('closeMenu').onclick = () => { menuPanel.style.display = 'none'; };
 }
 
-// The desktop keyboard-rebind panel has no purpose on a touch device -- it
+// The desktop keyboard-rebind table has no purpose on a touch device -- it
 // shows the mobile overlay/gamepad menu instead (see above).
 if (!isMobile) {
-  const settingsEl = document.getElementById('settings');
+  const settingsButton = document.getElementById('settingsButton');
+  const settingsPanel = document.getElementById('settingsPanel');
+  const settingsTableBody = document.getElementById('settingsTableBody');
+
   function renderSettings() {
-    settingsEl.innerHTML = '';
+    settingsTableBody.innerHTML = '';
     for (const [name, bit] of BUTTONS) {
+      const row = document.createElement('tr');
+      const nameCell = document.createElement('td');
+      nameCell.textContent = name;
+      const keyCell = document.createElement('td');
+      keyCell.textContent = bindings[name];
+      const actionCell = document.createElement('td');
       const btn = document.createElement('button');
-      btn.textContent = name + ': ' + bindings[name];
+      btn.textContent = 'Belegen';
       btn.onclick = () => {
-        btn.textContent = name + ': press a key...';
+        btn.textContent = 'Taste drücken...';
         const onKey = (e) => {
           e.preventDefault();
           bindings[name] = e.code;
@@ -539,10 +575,18 @@ if (!isMobile) {
         };
         window.addEventListener('keydown', onKey, true);
       };
-      settingsEl.appendChild(btn);
+      actionCell.appendChild(btn);
+      row.appendChild(nameCell);
+      row.appendChild(keyCell);
+      row.appendChild(actionCell);
+      settingsTableBody.appendChild(row);
     }
   }
   renderSettings();
+
+  settingsButton.style.display = 'flex';
+  settingsButton.onclick = () => { settingsPanel.style.display = 'flex'; };
+  document.getElementById('closeSettings').onclick = () => { settingsPanel.style.display = 'none'; };
 }
 }  // startStream
 </script>
