@@ -157,6 +157,12 @@ inline constexpr std::string_view GBA_STREAM_CLIENT_HTML = R"HTML(<!doctype html
              padding-top:max(20px, env(safe-area-inset-top));
              box-sizing:border-box;overflow-y:auto;text-align:center}
   #menuPanel h3{font-family:var(--font-display);margin:4px 0 4px;font-size:18px}
+  /* Live latency/frame-rate readout, shown above the button-mapping UI on
+     both desktop (settings gear) and mobile (hamburger menu) so a player who
+     notices lag has an immediate way to tell network latency (ping) apart
+     from a rendering/decode issue (frame rate) without leaving the page. */
+  .stats-row{display:flex;gap:18px;font-size:12.5px;color:var(--muted);margin:2px 0 6px}
+  .stats-row b{color:var(--ink);font-variant-numeric:tabular-nums;font-weight:700}
   .menu-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;
               margin-top:8px}
   .menu-row{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;
@@ -225,6 +231,10 @@ inline constexpr std::string_view GBA_STREAM_CLIENT_HTML = R"HTML(<!doctype html
 </div>
 <div id="settingsPanel">
   <h3>Tastenbelegung</h3>
+  <div class="stats-row">
+    <span>Ping: <b id="statPing">--</b> ms</span>
+    <span>Bildrate: <b id="statFps">--</b> fps</span>
+  </div>
   <table id="settingsTable">
     <thead><tr><th>Taste</th><th>Belegung</th><th></th></tr></thead>
     <tbody id="settingsTableBody"></tbody>
@@ -254,6 +264,10 @@ inline constexpr std::string_view GBA_STREAM_CLIENT_HTML = R"HTML(<!doctype html
 <button id="menuButton">&#9776;</button>
 <div id="menuPanel">
   <h3>Menü</h3>
+  <div class="stats-row">
+    <span>Ping: <b id="statPingMobile">--</b> ms</span>
+    <span>Bildrate: <b id="statFpsMobile">--</b> fps</span>
+  </div>
   <label class="menu-row" for="toggleOverlay">
     <span>Touch-Overlay anzeigen</span>
     <input type="checkbox" class="switch" id="toggleOverlay">
@@ -391,7 +405,7 @@ function playAudioChunk(sampleRate, channels, view, byteOffset, sampleCount) {
 
 const ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
 ws.binaryType = 'arraybuffer';
-ws.onopen = () => statusEl.textContent = 'connected';
+ws.onopen = () => { statusEl.textContent = 'connected'; sendPing(); };
 ws.onclose = () => statusEl.textContent = 'disconnected';
 ws.onerror = () => statusEl.textContent = 'error';
 
@@ -404,6 +418,39 @@ ws.onerror = () => statusEl.textContent = 'error';
 // already rendered -- checked below, right before putImageData.
 let latestVideoSeq = 0;
 
+// --- Latency/frame-rate monitoring, shown in the settings gear (desktop) and
+// hamburger menu (mobile) so a laggy connection is diagnosable at a glance:
+// ping (round trip to Dolphin, server echoes the timestamp back immediately
+// on receipt -- see GBAStreamHost.cpp) isolates network latency, while frame
+// rate (time between rendered video frames) separately reveals a decode/
+// render bottleneck even when the network itself is fine. ---
+let pingMs = null;
+let lastFrameAt = null;
+let frameIntervalMs = null;
+
+function updateStats() {
+  const pingText = pingMs === null ? '--' : Math.round(pingMs);
+  const fpsText =
+      frameIntervalMs === null || frameIntervalMs <= 0 ? '--' : Math.round(1000 / frameIntervalMs);
+  for (const id of ['statPing', 'statPingMobile']) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = pingText;
+  }
+  for (const id of ['statFps', 'statFpsMobile']) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = fpsText;
+  }
+}
+
+function sendPing() {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const msg = new Uint8Array(9);
+  msg[0] = 4;
+  new DataView(msg.buffer).setFloat64(1, performance.now(), true);
+  ws.send(msg);
+}
+setInterval(sendPing, 1000);
+
 ws.onmessage = async (ev) => {
   const view = new DataView(ev.data);
   const type = view.getUint8(0);
@@ -412,6 +459,11 @@ ws.onmessage = async (ev) => {
     const channels = view.getUint8(5);
     const sampleCount = (ev.data.byteLength - 6) / 2;
     playAudioChunk(sampleRate, channels, view, 6, sampleCount);
+    return;
+  }
+  if (type === 5) {
+    pingMs = performance.now() - view.getFloat64(1, true);
+    updateStats();
     return;
   }
   if (type !== 1) return;
@@ -423,6 +475,13 @@ ws.onmessage = async (ev) => {
       new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
   ).arrayBuffer();
   if (seq !== latestVideoSeq) return;  // A newer frame already arrived; this one is stale.
+  const now = performance.now();
+  if (lastFrameAt !== null) {
+    const dt = now - lastFrameAt;
+    frameIntervalMs = frameIntervalMs === null ? dt : frameIntervalMs * 0.8 + dt * 0.2;
+    updateStats();
+  }
+  lastFrameAt = now;
   const pixels = new DataView(raw);
   if (imageData.width !== width || imageData.height !== height) {
     canvas.width = width; canvas.height = height;

@@ -13,7 +13,10 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #else
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #endif
 
@@ -86,6 +89,32 @@ public:
   }
 };
 }  // namespace detail
+
+// Disables Nagle's algorithm on this socket. Without this, small writes --
+// one compressed video frame, a few bytes of input state -- can sit buffered
+// for tens of milliseconds waiting either for more data to coalesce or for
+// the peer's delayed ACK, which shows up directly as extra input/video
+// latency on a protocol that's mostly small, frequent messages rather than
+// bulk transfer. Safe to call right after accept(); has no effect on data
+// already queued for send.
+inline void SetNoDelay(sf::TcpSocket& socket)
+{
+  const sf::SocketHandle handle = detail::TcpSocketHandleAccessor::Get(socket);
+#ifdef _WIN32
+  if (handle == INVALID_SOCKET)
+    return;
+#else
+  if (handle < 0)
+    return;
+#endif
+  const int enable = 1;
+#ifdef _WIN32
+  setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&enable),
+             sizeof(enable));
+#else
+  setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable));
+#endif
+}
 
 // Makes this socket's eventual close send an immediate RST instead of a
 // graceful FIN (SO_LINGER with a zero timeout), which skips TCP's TIME_WAIT

@@ -52,6 +52,14 @@ constexpr u32 GBA_STREAM_HEIGHT = 160;
 constexpr u8 MSG_TYPE_VIDEO_FRAME = 0x01;
 constexpr u8 MSG_TYPE_INPUT = 0x02;
 constexpr u8 MSG_TYPE_AUDIO = 0x03;
+// Client sends an 8-byte opaque timestamp (its own clock, meaningless to us)
+// once a second; we echo it back verbatim as soon as it's parsed, from
+// within the receive loop rather than waiting for the next Send*IfPending
+// pass, so the round-trip the client measures reflects real network +
+// dispatch latency instead of being inflated by our own poll interval. Lets
+// the client's latency-monitoring UI show a real ping instead of a guess.
+constexpr u8 MSG_TYPE_PING = 0x04;
+constexpr u8 MSG_TYPE_PONG = 0x05;
 
 // Remote key bitmask layout (client->server). Chosen to mirror the bit order
 // SI_DeviceGBAEmu::GetData() already uses for the internal GBA keypad word,
@@ -79,8 +87,12 @@ std::vector<u8> DeflateRaw(const std::vector<u8>& input)
 {
   z_stream strm{};
   // windowBits = -15 requests headerless "raw deflate", which is exactly what
-  // the browser's DecompressionStream('deflate-raw') expects.
-  if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+  // the browser's DecompressionStream('deflate-raw') expects. Z_BEST_SPEED
+  // over the default level trades a slightly larger payload for noticeably
+  // less CPU time per frame -- on a LAN the extra bytes are negligible, but
+  // the encode time is pure added latency for a real-time stream, and GBA
+  // frames (paletted pixel art) compress well even at the fastest level.
+  if (deflateInit2(&strm, Z_BEST_SPEED, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
     return {};
 
   std::vector<u8> out(deflateBound(&strm, static_cast<uLong>(input.size())));
@@ -311,6 +323,7 @@ void GBAStreamHost::ServeConnection(sf::TcpSocket& socket)
   // network, frozen tab) can never block this thread -- and therefore never
   // block stopping emulation -- indefinitely.
   socket.setBlocking(false);
+  SetNoDelay(socket);
 
   bool is_websocket = false;
   if (!PerformHandshake(socket, &is_websocket) || !is_websocket)
@@ -494,6 +507,15 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
             const u16 keys =
                 static_cast<u16>(frame->payload[1]) | (static_cast<u16>(frame->payload[2]) << 8);
             m_remote_keys.store(keys);
+          }
+          else if (frame->opcode == OPCODE_BINARY && frame->payload.size() == 9 &&
+                   frame->payload[0] == MSG_TYPE_PING)
+          {
+            std::vector<u8> pong;
+            pong.reserve(9);
+            pong.push_back(MSG_TYPE_PONG);
+            pong.insert(pong.end(), frame->payload.begin() + 1, frame->payload.end());
+            SendWebSocketBinaryFrame(socket, pong, m_stop);
           }
         }
         if (disconnect_requested)
