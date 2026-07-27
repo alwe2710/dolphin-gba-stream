@@ -831,6 +831,14 @@ endif()
 #
 add_subdirectory(Source)
 
+if(USE_MGBA)
+  # BUILD_GBA_WEB_CLIENT_WASM (default OFF, see that CMakeLists.txt) gates
+  # whether this actually builds anything -- offering the option at all
+  # without USE_MGBA wouldn't make sense, the web client streams the GBA
+  # feature that option gates.
+  add_subdirectory(Source/Core/Core/HW/GBAStreamWebClient)
+endif()
+
 ########################################
 # Install shared data files
 #

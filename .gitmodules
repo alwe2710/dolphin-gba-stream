@@ -134,3 +134,10 @@
 	path = Externals/wil
 	url = https://github.com/microsoft/wil.git
 	shallow = true
+[submodule "Externals/emsdk"]
+	path = Externals/emsdk
+	url = https://github.com/emscripten-core/emsdk.git
+[submodule "Externals/finlink"]
+	path = Externals/finlink
+	url = https://github.com/alwe2710/finlink.git
+	branch = feature/protocol-v2
