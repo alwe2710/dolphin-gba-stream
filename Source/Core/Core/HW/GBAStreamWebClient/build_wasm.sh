@@ -66,7 +66,13 @@ emcc "$SCRIPT_DIR/wasm_bridge.c" \
   -O2
 
 echo "== running the Node.js bridge test =="
-cp "$SCRIPT_DIR/bridge_test.mjs" "$OUT_DIR/bridge_test.mjs"
+# Only copy when OUT_DIR actually differs (the CMake-invoked case, whose
+# build dir is separate from this script's own) -- when run standalone,
+# OUT_DIR defaults to SCRIPT_DIR itself (see above), and `cp` refuses to
+# copy a file onto itself.
+if [ "$SCRIPT_DIR" != "$OUT_DIR" ]; then
+  cp "$SCRIPT_DIR/bridge_test.mjs" "$OUT_DIR/bridge_test.mjs"
+fi
 (cd "$OUT_DIR" && "$EMSDK_DIR/node/"*/bin/node bridge_test.mjs)
 
 echo "== wrapping finlink_core.js as a C++ header =="
