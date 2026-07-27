@@ -469,7 +469,7 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
 
   HandshakeOffer offer;
   offer.stream_type = kStreamTypeGcGbaLink;
-  offer.slots = {HandshakeSlot{m_device_number, GetSlotLabel(m_device_number),
+  offer.slot_list = {HandshakeSlot{m_device_number, GetSlotLabel(m_device_number),
                                m_client_connected.load()}};
   offer.video_width = GBA_NATIVE_WIDTH;
   offer.video_height = GBA_NATIVE_HEIGHT;

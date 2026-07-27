@@ -44,7 +44,13 @@ struct HandshakeAudioInfo
 struct HandshakeOffer
 {
   std::string stream_type;
-  std::vector<HandshakeSlot> slots;
+  // Named slot_list, not "slots" -- Qt's <QObject> headers #define slots as a
+  // macro (Q_SLOTS), which silently mangles a field of that exact name into
+  // a syntax error the moment any translation unit that includes this header
+  // also includes Qt (e.g. DolphinQt/MainWindow.cpp). The wire field is still
+  // "slots" (see BuildHelloMessage) -- that's a JSON string literal, entirely
+  // unaffected by C++ identifier macros.
+  std::vector<HandshakeSlot> slot_list;
   u32 video_width;
   u32 video_height;
   double video_fps;

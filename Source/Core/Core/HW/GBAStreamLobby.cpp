@@ -98,10 +98,10 @@ void PerformHandshakeAndRedirect(sf::TcpSocket& socket, const HttpRequest& reque
 
   HandshakeOffer offer;
   offer.stream_type = kStreamTypeGcGbaLink;
-  offer.slots.reserve(configured_devices.size());
+  offer.slot_list.reserve(configured_devices.size());
   for (const int device_number : configured_devices)
   {
-    offer.slots.push_back(HandshakeSlot{device_number, GBAStreamHost::GetSlotLabel(device_number),
+    offer.slot_list.push_back(HandshakeSlot{device_number, GBAStreamHost::GetSlotLabel(device_number),
                                         GBAStreamHost::IsSlotOccupied(device_number)});
   }
   offer.video_width = GBA_NATIVE_WIDTH;

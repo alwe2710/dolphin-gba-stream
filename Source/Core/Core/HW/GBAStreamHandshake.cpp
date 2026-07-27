@@ -71,8 +71,8 @@ std::string BuildHelloMessage(const HandshakeOffer& offer)
   obj.emplace("stream_type", offer.stream_type);
 
   picojson::array slots;
-  slots.reserve(offer.slots.size());
-  for (const auto& slot : offer.slots)
+  slots.reserve(offer.slot_list.size());
+  for (const auto& slot : offer.slot_list)
   {
     picojson::object slot_obj;
     slot_obj.emplace("index", static_cast<double>(slot.index));
