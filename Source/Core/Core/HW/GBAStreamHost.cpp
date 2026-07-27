@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -353,10 +354,36 @@ void GBAStreamHost::AcceptLoop()
   {
     if (!selector.wait(sf::milliseconds(100)))
       continue;
-    sf::TcpSocket socket;
-    if (m_listener.accept(socket) != sf::Socket::Status::Done)
+    auto socket = std::make_shared<sf::TcpSocket>();
+    if (m_listener.accept(*socket) != sf::Socket::Status::Done)
       continue;
-    ServeConnection(socket);
+
+    // Dispatched to its own thread rather than served inline here (see
+    // ServeConnection()'s header comment for why) -- `socket` is kept alive
+    // for that thread's lifetime by the shared_ptr the lambda captures.
+    // Threads aren't reaped as they finish, only joined in bulk once this
+    // loop itself exits below: a /status probe's thread lives at most a
+    // few hundred milliseconds, and this project's Dolphin sessions don't
+    // run long/busy enough for the resulting handful-to-low-hundreds of
+    // joinable-but-finished std::thread objects to matter -- simpler than
+    // adding a way to detect "already finished" without joining.
+    std::lock_guard<std::mutex> lock(m_connection_threads_mutex);
+    m_connection_threads.emplace_back([this, socket] { ServeConnection(*socket); });
+  }
+
+  // m_stop is set: every ServeConnection() thread's own blocking calls
+  // already unwind promptly once they observe it (same stop_flag pattern as
+  // this loop's own selector.wait() above), so this join only has to wait
+  // out that same ~100ms budget per thread, not an active session's full
+  // remaining duration. Must happen here, before returning -- ~GBAStreamHost()
+  // (the only caller that sets m_stop and then joins m_accept_thread, which
+  // runs this function) starts destroying this object's members right after
+  // that join, and every still-running ServeConnection() touches them.
+  std::lock_guard<std::mutex> lock(m_connection_threads_mutex);
+  for (std::thread& t : m_connection_threads)
+  {
+    if (t.joinable())
+      t.join();
   }
 }
 
@@ -421,11 +448,9 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
   {
     // Player ports are API-only (status + WebSocket); send anyone who
     // navigates here directly (e.g. an old bookmark) to the lobby (fixed
-    // port 6800) instead of duplicating its page here. (Since protocol
-    // version 2, the lobby no longer serves an HTML page either -- it now
-    // speaks the same app-level handshake as this port, see
-    // GBAStreamLobby.cpp -- but redirecting a stray plain-HTTP request there
-    // is still more useful than a bare error.)
+    // port 6800) instead of duplicating its page here -- a plain GET there
+    // once again serves the (now WASM-based) web client page, see
+    // GBAStreamLobby.cpp/GBAStreamClientPage.h.
     std::string host = headers.count("host") ? headers.at("host") : "localhost";
     const auto colon = host.find(':');
     if (colon != std::string::npos)

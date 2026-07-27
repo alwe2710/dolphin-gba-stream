@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -229,10 +230,29 @@ private:
     {
       if (!selector.wait(sf::milliseconds(100)))
         continue;
-      sf::TcpSocket socket;
-      if (m_listener.accept(socket) != sf::Socket::Status::Done)
+      auto socket = std::make_shared<sf::TcpSocket>();
+      if (m_listener.accept(*socket) != sf::Socket::Status::Done)
         continue;
-      HandleConnection(socket);
+
+      // Dispatched to its own thread rather than served inline here: a plain
+      // GET / response now embeds the whole WASM web client
+      // (GBAStreamWebClientJs.h) inline, which can take a real amount of
+      // time to send over a slow link, and serving it inline on the same
+      // thread that also accept()s would block every other prospective
+      // client -- including the app handshake HandleConnection() also runs
+      // for a WS-upgraded connection -- for that whole duration. Same fix
+      // and reasoning as GBAStreamHost::ServeConnection (see its header
+      // comment); threads aren't reaped as they finish, only joined in bulk
+      // once this loop exits, for the same reasoning given there.
+      std::lock_guard<std::mutex> lock(m_connection_threads_mutex);
+      m_connection_threads.emplace_back([this, socket] { HandleConnection(*socket); });
+    }
+
+    std::lock_guard<std::mutex> lock(m_connection_threads_mutex);
+    for (std::thread& t : m_connection_threads)
+    {
+      if (t.joinable())
+        t.join();
     }
   }
 
@@ -282,6 +302,12 @@ private:
   std::thread m_thread;
   std::atomic_bool m_stop{false};
   GBAStreamBeacon m_beacon;
+
+  // One entry per connection HandleConnection() is currently handling (or
+  // has handled) -- see AcceptLoop()'s comment. Joined in full at its tail,
+  // after m_stop is set, before Stop()'s own m_thread.join() can return.
+  std::mutex m_connection_threads_mutex;
+  std::vector<std::thread> m_connection_threads;
 };
 
 LobbyServer& GetLobbyServer()

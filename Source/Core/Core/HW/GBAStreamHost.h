@@ -81,6 +81,13 @@ public:
 
 private:
   void AcceptLoop();
+  // Runs on its own thread, one per accepted connection (see m_connection_threads
+  // below) -- never called inline from AcceptLoop() itself. A single active
+  // stream's RunWebSocketSession() runs for as long as the game is being
+  // played, so serving connections inline on the same thread that also
+  // accept()s would starve every other connection on this port -- including a
+  // quick /status probe from a second prospective client -- for that entire
+  // duration, making an occupied slot look unreachable rather than occupied.
   void ServeConnection(sf::TcpSocket& socket);
   bool PerformHandshake(sf::TcpSocket& socket, bool* is_websocket);
   // Runs the app-level handshake (GBAStreamHandshake.h) on an already
@@ -112,6 +119,14 @@ private:
   sf::TcpListener m_listener;
   std::thread m_accept_thread;
   std::atomic_bool m_stop{false};
+
+  // One entry per connection ServeConnection() is currently handling (or has
+  // handled -- see AcceptLoop()'s comment on why these aren't reaped mid-
+  // session), each holding the socket it serves alive for its own lifetime.
+  // Joined in full at the tail of AcceptLoop(), after m_stop is set, so no
+  // connection thread can touch this object's members past that point.
+  std::mutex m_connection_threads_mutex;
+  std::vector<std::thread> m_connection_threads;
 
   // Latest raw GBA framebuffer handed off from the GBA core thread (FrameEnded)
   // to the connection-serving thread. Single slot by design: real-time video
