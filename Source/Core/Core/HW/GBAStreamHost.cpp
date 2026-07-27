@@ -432,10 +432,18 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
     const std::string body =
         std::string("{\"occupied\":") + (m_client_connected ? "true" : "false") + "}";
     std::ostringstream response;
+    // std::to_string(), not body.size() streamed directly: an ostringstream
+    // formats integers per the process's current locale, which (unlike the
+    // "C" locale streams default to) may insert thousands-grouping
+    // punctuation into what must be a plain decimal Content-Length --
+    // std::to_string() is always locale-independent. See GBAStreamLobby.cpp's
+    // identical fix for where this was actually observed (this body is
+    // always under 1000 bytes, too small to trigger grouping, but the bug
+    // is the same).
     response << "HTTP/1.1 200 OK\r\n"
              << "Content-Type: application/json\r\n"
              << "Access-Control-Allow-Origin: *\r\n"
-             << "Content-Length: " << body.size() << "\r\n"
+             << "Content-Length: " << std::to_string(body.size()) << "\r\n"
              << "Connection: close\r\n\r\n"
              << body;
     const std::string response_str = response.str();

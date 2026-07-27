@@ -277,9 +277,19 @@ private:
       // handshake and unaffected by protocol_version.
       const std::string body = BuildClientHtml();
       std::ostringstream response;
+      // std::to_string(), not body.size() streamed directly: an
+      // ostringstream formats integers per the process's current locale
+      // (Qt sets this from the system locale at startup), which can insert
+      // thousands-grouping punctuation into what must be a plain decimal
+      // Content-Length -- e.g. a German locale turning byte count 45934
+      // into the literal header value "45.934", which every HTTP client
+      // correctly rejects as malformed. This body (the WASM-embedding web
+      // client page) is comfortably past the ~1000-byte threshold where
+      // grouping kicks in, unlike GBAStreamHost.cpp's /status body -- see
+      // its identical fix. std::to_string() is always locale-independent.
       response << "HTTP/1.1 200 OK\r\n"
                << "Content-Type: text/html; charset=utf-8\r\n"
-               << "Content-Length: " << body.size() << "\r\n"
+               << "Content-Length: " << std::to_string(body.size()) << "\r\n"
                << "Connection: close\r\n\r\n"
                << body;
       const std::string response_str = response.str();
