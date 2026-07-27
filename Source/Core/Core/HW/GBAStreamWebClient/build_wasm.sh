@@ -85,9 +85,25 @@ JS_HEADER="$SCRIPT_DIR/GBAStreamWebClientJs.h"
   echo "#ifdef HAS_LIBMGBA"
   echo "#include <string_view>"
   echo "namespace HW::GBA {"
+  # The "sv" suffix (not a bare raw-string literal implicitly converted to
+  # string_view) is load-bearing here, not stylistic: emscripten's
+  # SINGLE_FILE=1 output embeds the compiled .wasm binary as raw bytes
+  # inside a JS string (binaryDecode() reverses a per-character bit trick
+  # rather than base64-decoding), and a WASM binary's very first bytes are
+  # its magic number, "\0asm" -- an embedded NUL. std::string_view's
+  # constructor from a bare `const char*` computes length via strlen(),
+  # silently truncating at that very first NUL and losing >95% of the
+  # actual content; the "sv" literal instead captures the raw string
+  # literal's true, full compile-time array length. Confirmed via a real
+  # browser: the truncated bare-pointer version produced "SyntaxError:
+  # Invalid or unexpected token" (an unterminated JS string) followed by
+  # "FinlinkCore is not defined", not caught by bridge_test.mjs above since
+  # that runs directly against finlink_core.js and never goes through this
+  # string_view construction step at all.
+  echo "using namespace std::string_view_literals;"
   echo 'inline constexpr std::string_view GBA_STREAM_WEB_CLIENT_JS = R"FINLINK_WASM_JS('
   cat "$OUT_DIR/finlink_core.js"
-  echo ')FINLINK_WASM_JS";'
+  echo ')FINLINK_WASM_JS"sv;'
   echo "}  // namespace HW::GBA"
   echo "#endif  // HAS_LIBMGBA"
 } > "$JS_HEADER"
