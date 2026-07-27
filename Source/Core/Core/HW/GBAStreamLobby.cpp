@@ -6,7 +6,6 @@
 #include "Core/HW/GBAStreamLobby.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -25,6 +24,7 @@
 
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/GBAStreamBeacon.h"
+#include "Core/HW/GBAStreamClientPage.h"
 #include "Core/HW/GBAStreamHandshake.h"
 #include "Core/HW/GBAStreamHost.h"
 #include "Core/HW/GBAStreamNetUtil.h"
@@ -247,17 +247,18 @@ private:
 
     if (!IsWebSocketUpgradeRequest(*request))
     {
-      // Since protocol_version 2, the lobby no longer serves an HTML picker
-      // page here (see finlink's docs/protocol.md, "Bekannte Einschränkungen"
-      // -- slot selection is now part of the WebSocket handshake below, not
-      // a page a human clicks through). A plain GET just gets a short
-      // explanatory response instead of silently doing nothing useful.
-      static const std::string body =
-          "finlink handshake endpoint (WebSocket only, protocol_version " +
-          std::to_string(GBA_STREAM_PROTOCOL_VERSION) + "). See docs/protocol.md in the finlink repo.";
+      // A plain (non-WS-upgrade) GET here is a human opening this URL in a
+      // browser -- the web client page, sharing finlink_core's handshake/
+      // video/audio/input logic via WASM (GBAStreamWebClient/wasm_bridge.c)
+      // rather than a parallel JS implementation of protocol_version 2. Its
+      // own JS then performs the *app-level* handshake itself once a slot is
+      // picked, as its own WebSocket connection to a player port -- entirely
+      // separate from this HTTP response, which is unrelated to that
+      // handshake and unaffected by protocol_version.
+      const std::string body = BuildClientHtml();
       std::ostringstream response;
-      response << "HTTP/1.1 400 Bad Request\r\n"
-               << "Content-Type: text/plain; charset=utf-8\r\n"
+      response << "HTTP/1.1 200 OK\r\n"
+               << "Content-Type: text/html; charset=utf-8\r\n"
                << "Content-Length: " << body.size() << "\r\n"
                << "Connection: close\r\n\r\n"
                << body;

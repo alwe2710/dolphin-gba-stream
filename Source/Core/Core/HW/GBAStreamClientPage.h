@@ -5,7 +5,10 @@
 
 #ifdef HAS_LIBMGBA
 
+#include <string>
 #include <string_view>
+
+#include "Core/HW/GBAStreamWebClient/GBAStreamWebClientJs.h"
 
 namespace HW::GBA
 {
@@ -16,10 +19,16 @@ namespace HW::GBA
 // find out which ones currently have a GBAStreamHost running at all (i.e.
 // are configured as GBA (Client-Stream)) and whether each is already
 // occupied by another client, then shows a picker with unavailable slots
-// grayed out. Picking a slot opens a WebSocket directly to that player port
-// and switches to the canvas+input view, which decodes raw-deflate RGB565
-// video frames, plays PCM audio via the Web Audio API, and sends a 3-byte
-// input message whenever the locally-held button state changes.
+// grayed out. Picking a slot opens a WebSocket directly to that player port,
+// performs the app-level handshake (finlink/handshake.h, docs/protocol.md)
+// via the embedded finlink_core WASM module (GBAStreamWebClientJs.h, built
+// from Externals/finlink/core -- same handshake/video/audio/input codec
+// logic as the Android/3DS/Switch clients, not a hand-maintained parallel
+// JS reimplementation of it), and switches to the canvas+input view, which
+// decodes raw-deflate RGB565 video frames (deflate itself stays native
+// browser code, see GBAStreamWebClient/wasm_bridge.c's own comment on why),
+// plays PCM audio via the Web Audio API, and sends a 3-byte input message
+// whenever the locally-held button state changes.
 //
 // On a touch-capable device (phones/tablets, which have no physical
 // keyboard) the video goes fullscreen with a mobile-emulator-style D-pad and
@@ -34,7 +43,11 @@ namespace HW::GBA
 // accent used only for the primary/active affordance (the A button, primary
 // actions) so it doesn't compete with itself. Chosen from a set of three
 // design proposals shown to and picked by the project owner.
-inline constexpr std::string_view GBA_STREAM_CLIENT_HTML = R"HTML(<!doctype html>
+// Split immediately before the page's own <script> block so BuildClientHtml()
+// below can splice in a second <script> (the embedded finlink_core WASM
+// module, GBA_STREAM_WEB_CLIENT_JS) right ahead of it -- everything else
+// about this page is one unbroken raw string same as before this split.
+inline constexpr std::string_view GBA_STREAM_CLIENT_HTML_HEAD = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Dolphin GBA Stream</title>
@@ -277,13 +290,33 @@ inline constexpr std::string_view GBA_STREAM_CLIENT_HTML = R"HTML(<!doctype html
   <button id="closeMenu">Schließen</button>
 </div>
 </div>
-<script>
+)HTML";
+
+// finlink_core (Externals/finlink/core), compiled to WASM, wrapped as a
+// MODULARIZE'd/SINGLE_FILE JS module (GBAStreamWebClient/wasm_bridge.c) --
+// loaded first so the FinlinkCore() factory it defines exists before the
+// page's own script runs and calls it (see the "await wasmModulePromise"
+// near the top of that script, below).
+inline constexpr std::string_view GBA_STREAM_CLIENT_HTML_TAIL = R"HTML(<script>
 // Any touch-capable device is treated as mobile: fullscreen video, on-screen
 // overlay instead of the keyboard-rebind panel, and the hamburger menu for
 // optional gamepad binding -- detected up front (not just once a slot is
 // picked) so the lobby screen itself can also adapt its layout.
 const isMobile = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
 if (isMobile) document.body.classList.add('mobile');
+
+// Kicked off now (in parallel with the lobby's own /status polling below,
+// not awaited here) so the WASM module -- finlink_core, see this file's own
+// top comment -- is normally already instantiated by the time a slot is
+// actually picked; startStream() awaits this promise itself regardless, so
+// picking a slot before it resolves still works, just without the head
+// start. FINLINK_PROTOCOL_VERSION mirrors GBA_STREAM_PROTOCOL_VERSION
+// (Core/HW/GBAStreamNetUtil.h) and finlink/handshake.h -- this is the one
+// piece of protocol knowledge that has to be duplicated here rather than
+// asked of the WASM module itself, since it's needed before any handshake
+// message (which is what would otherwise report it) has been received.
+const FINLINK_PROTOCOL_VERSION = 2;
+const wasmModulePromise = FinlinkCore();
 
 const PLAYER_BASE_PORT = 6801;
 const lobbyEl = document.getElementById('lobby');
@@ -339,7 +372,7 @@ async function buildLobby() {
 }
 buildLobby();
 
-function startStream(port) {
+async function startStream(port) {
 const BUTTONS = [
   ['A', 1<<0, 'KeyX'], ['B', 1<<1, 'KeyZ'], ['Select', 1<<2, 'ShiftRight'],
   ['Start', 1<<3, 'Enter'], ['Right', 1<<4, 'ArrowRight'], ['Left', 1<<5, 'ArrowLeft'],
@@ -403,11 +436,147 @@ function playAudioChunk(sampleRate, channels, view, byteOffset, sampleCount) {
   nextAudioTime += buffer.duration;
 }
 
-const ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
-ws.binaryType = 'arraybuffer';
-ws.onopen = () => { statusEl.textContent = 'connected'; sendPing(); };
-ws.onclose = () => statusEl.textContent = 'disconnected';
-ws.onerror = () => statusEl.textContent = 'error';
+// finlink_core (see this file's top comment) -- awaited here rather than at
+// module scope so a slot picked before FinlinkCore() resolves still works,
+// just without the head start wasmModulePromise being kicked off early
+// normally provides.
+const wasmModule = await wasmModulePromise;
+
+// Persistent WASM-heap scratch buffers, reused/grown across messages rather
+// than malloc'd+freed per one -- framebufferPtr in particular *must*
+// persist across calls (not just "may as an optimization"): it's the
+// framebuffer_rgb565 finlink_decode_video_frame patches
+// FINLINK_VIDEO_FORMAT_TILES updates onto, so it needs to still hold real
+// prior content, not a fresh/blank buffer, every call after the first.
+let videoMsgPtr = 0, videoMsgCap = 0;
+let inflatedPtr = 0, inflatedCap = 0;
+let framebufferPtr = 0, framebufferCap = 0;
+
+function ensureCapacity(ptr, cap, needed) {
+  if (needed <= cap) return [ptr, cap];
+  if (ptr) wasmModule._free(ptr);
+  return [wasmModule._malloc(needed), needed];
+}
+
+let ws;
+// Tracks the actually-connected port across a handshake redirect (see
+// handleHandshakeMessage's session_ready branch) -- the `port` function
+// parameter stays whatever slot the picker button was originally clicked
+// for, which is wrong once a redirect has moved the connection elsewhere.
+let currentPort = port;
+
+function fail(reason) {
+  statusEl.textContent = reason;
+  if (ws) ws.close();
+}
+
+function connect(host, connectPort) {
+  currentPort = connectPort;
+  ws = new WebSocket('ws://' + host + ':' + connectPort + '/');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { statusEl.textContent = 'handshake...'; };
+  ws.onclose = () => { statusEl.textContent = 'disconnected'; };
+  ws.onerror = () => { statusEl.textContent = 'error'; };
+  // Text frames (typeof ev.data === 'string', always true for a WS text
+  // message regardless of ws.binaryType, which only affects *binary*
+  // messages) are the app-level handshake (finlink/handshake.h); binary
+  // ones are the existing Video/Audio/Input/ping wire format, unchanged by
+  // any of this.
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      handleHandshakeMessage(ev.data);
+    } else {
+      handleBinaryMessage(ev.data);
+    }
+  };
+}
+
+// --- App-level handshake (finlink/handshake.h, docs/protocol.md
+// "Verbindungsaufbau: Handshake") -- every field access below goes through
+// a WASM getter rather than hand-parsing the JSON text directly in JS, even
+// though the browser has JSON.parse built in, so the field *names*/shape
+// stay defined in exactly one place (finlink/handshake.h) instead of a
+// second hand-maintained copy here that could silently drift from it. ---
+
+function handleHandshakeMessage(text) {
+  const bytes = new TextEncoder().encode(text);
+  const bytesPtr = wasmModule._malloc(bytes.length);
+  wasmModule.HEAPU8.set(bytes, bytesPtr);
+  try {
+    const msgType = wasmModule.ccall('finlink_wasm_peek_handshake_message', 'number',
+        ['number', 'number'], [bytesPtr, bytes.length]);
+
+    if (msgType === 1) {  // hello
+      if (!wasmModule.ccall('finlink_wasm_parse_hello', 'number', ['number', 'number'],
+                             [bytesPtr, bytes.length])) {
+        fail('hello konnte nicht gelesen werden');
+        return;
+      }
+      const serverVersion = wasmModule.ccall('finlink_wasm_hello_protocol_version', 'number', [], []);
+      if (serverVersion !== FINLINK_PROTOCOL_VERSION) {
+        fail('Server spricht Protokollversion ' + serverVersion + ', dieser Client unterstützt nur ' +
+             'Version ' + FINLINK_PROTOCOL_VERSION + ' -- bitte Client oder Server aktualisieren.');
+        return;
+      }
+      const wantsAudio = wasmModule.ccall('finlink_wasm_hello_has_audio', 'number', [], []);
+      const nativeWidth = wasmModule.ccall('finlink_wasm_hello_video_width', 'number', [], []);
+      const nativeHeight = wasmModule.ccall('finlink_wasm_hello_video_height', 'number', [], []);
+      const nativeFps = wasmModule.ccall('finlink_wasm_hello_video_fps', 'number', [], []);
+      // Generous/native throughout: nothing about a browser tab justifies
+      // asking the server to downscale a 240x160 GBA stream.
+      const sampleRate = wantsAudio ?
+          wasmModule.ccall('finlink_wasm_hello_audio_sample_rate', 'number', [], []) : 48000;
+      const channels = wantsAudio ?
+          wasmModule.ccall('finlink_wasm_hello_audio_channels', 'number', [], []) : 2;
+      const requestedSlot = currentPort - PLAYER_BASE_PORT;
+
+      const ackCap = 512;
+      const ackPtr = wasmModule._malloc(ackCap);
+      const ackLen = wasmModule.ccall('finlink_wasm_build_hello_ack', 'number',
+          ['number', 'number', 'number', 'number', 'number', 'number', 'number', 'number', 'number'],
+          [requestedSlot, nativeWidth, nativeHeight, nativeFps, wantsAudio, sampleRate, channels,
+           ackPtr, ackCap]);
+      const ackJson = wasmModule.UTF8ToString(ackPtr, ackLen);
+      wasmModule._free(ackPtr);
+      ws.send(ackJson);  // .send(string) -- the browser sends this as a WS text frame itself.
+      return;
+    }
+
+    if (msgType === 2) {  // session_ready
+      if (!wasmModule.ccall('finlink_wasm_parse_session_ready', 'number', ['number', 'number'],
+                             [bytesPtr, bytes.length])) {
+        fail('session_ready konnte nicht gelesen werden');
+        return;
+      }
+      if (wasmModule.ccall('finlink_wasm_ready_has_redirect', 'number', [], [])) {
+        // Not reachable via this page's own P1-P4 picker (it always dials a
+        // specific player port directly, same as Android's jni_bridge.c) --
+        // handled anyway, since docs/protocol.md defines it independently of
+        // which client happens to trigger it.
+        const redirectHost = wasmModule.ccall('finlink_wasm_ready_redirect_host', 'string', [], []);
+        const redirectPort = wasmModule.ccall('finlink_wasm_ready_redirect_port', 'number', [], []);
+        ws.close();
+        connect(redirectHost, redirectPort);
+        return;
+      }
+      statusEl.textContent = 'connected';
+      sendPing();
+      return;
+    }
+
+    if (msgType === 3) {  // handshake_error
+      wasmModule.ccall('finlink_wasm_parse_handshake_error', 'number', ['number', 'number'],
+                        [bytesPtr, bytes.length]);
+      const detail = wasmModule.ccall('finlink_wasm_error_detail', 'string', [], []);
+      fail(detail || 'Handshake vom Server abgelehnt.');
+      return;
+    }
+
+    fail('Unerwartete Nachricht vom Server.');
+  } finally {
+    wasmModule._free(bytesPtr);
+  }
+}
 
 // Bumped for every incoming video frame and captured before the (async)
 // decompression below. WebSocket message events are delivered in order, but
@@ -442,8 +611,11 @@ function updateStats() {
   }
 }
 
+// Dolphin-specific latency probe, entirely separate from finlink's own
+// protocol messages (types 1/2/3) -- not something any other client
+// implements either, so nothing here goes through the WASM bridge.
 function sendPing() {
-  if (ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const msg = new Uint8Array(9);
   msg[0] = 4;
   new DataView(msg.buffer).setFloat64(1, performance.now(), true);
@@ -451,31 +623,66 @@ function sendPing() {
 }
 setInterval(sendPing, 1000);
 
-ws.onmessage = async (ev) => {
-  const view = new DataView(ev.data);
+function handleBinaryMessage(msgBuffer) {
+  const view = new DataView(msgBuffer);
   const type = view.getUint8(0);
-  if (type === 3) {
-    const sampleRate = view.getUint32(1, true);
-    const channels = view.getUint8(5);
-    const sampleCount = (ev.data.byteLength - 6) / 2;
-    playAudioChunk(sampleRate, channels, view, 6, sampleCount);
+
+  if (type === 3) {  // audio
+    const bytes = new Uint8Array(msgBuffer);
+    const ptr = wasmModule._malloc(bytes.length);
+    wasmModule.HEAPU8.set(bytes, ptr);
+    try {
+      if (!wasmModule.ccall('finlink_wasm_parse_audio_frame', 'number', ['number', 'number'],
+                             [ptr, bytes.length])) {
+        return;
+      }
+      const sampleRate = wasmModule.ccall('finlink_wasm_audio_sample_rate', 'number', [], []);
+      const channels = wasmModule.ccall('finlink_wasm_audio_channels', 'number', [], []);
+      const sampleCount = wasmModule.ccall('finlink_wasm_audio_sample_count', 'number', [], []);
+      const samplesOffset = wasmModule.ccall('finlink_wasm_audio_samples_offset', 'number',
+                                              ['number'], [ptr]);
+      playAudioChunk(sampleRate, channels, view, samplesOffset, sampleCount);
+    } finally {
+      wasmModule._free(ptr);
+    }
     return;
   }
-  if (type === 5) {
+
+  if (type === 5) {  // pong
     pingMs = performance.now() - view.getFloat64(1, true);
     updateStats();
     return;
   }
+
   if (type !== 1) return;
+  handleVideoMessage(msgBuffer);
+}
+
+async function handleVideoMessage(msgBuffer) {
   const seq = ++latestVideoSeq;
-  const width = view.getUint32(1, true);
-  const height = view.getUint32(5, true);
-  const format = view.getUint8(9);
-  const compressed = ev.data.slice(10);
-  const raw = await new Response(
+  const bytes = new Uint8Array(msgBuffer);
+  [videoMsgPtr, videoMsgCap] = ensureCapacity(videoMsgPtr, videoMsgCap, bytes.length);
+  wasmModule.HEAPU8.set(bytes, videoMsgPtr);
+  if (!wasmModule.ccall('finlink_wasm_parse_video_header', 'number', ['number', 'number'],
+                         [videoMsgPtr, bytes.length])) {
+    return;
+  }
+
+  const width = wasmModule.ccall('finlink_wasm_video_width', 'number', [], []);
+  const height = wasmModule.ccall('finlink_wasm_video_height', 'number', [], []);
+  const format = wasmModule.ccall('finlink_wasm_video_format', 'number', [], []);
+  const compressedOffset = wasmModule.ccall('finlink_wasm_video_compressed_offset', 'number',
+                                             ['number'], [videoMsgPtr]);
+  const compressedSize = wasmModule.ccall('finlink_wasm_video_compressed_size', 'number', [], []);
+  const compressed = bytes.slice(compressedOffset, compressedOffset + compressedSize);
+
+  // Deflate decompression stays native browser code, not WASM -- see this
+  // file's top comment and GBAStreamWebClient/wasm_bridge.c for why.
+  const rawBuf = await new Response(
       new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
   ).arrayBuffer();
   if (seq !== latestVideoSeq) return;  // A newer frame already arrived; this one is stale.
+
   const now = performance.now();
   if (lastFrameAt !== null) {
     const dt = now - lastFrameAt;
@@ -483,79 +690,69 @@ ws.onmessage = async (ev) => {
     updateStats();
   }
   lastFrameAt = now;
+
+  const inflatedBytes = new Uint8Array(rawBuf);
+  [inflatedPtr, inflatedCap] = ensureCapacity(inflatedPtr, inflatedCap, inflatedBytes.length);
+  wasmModule.HEAPU8.set(inflatedBytes, inflatedPtr);
+
+  const neededFbCap = width * height * 2;
+  if (neededFbCap > framebufferCap) {
+    // Only ever grows alongside a resolution change, which the server always
+    // sends as a full (non-TILES) frame -- see finlink/protocol.h's own note
+    // that the first frame after connect is always full for exactly this
+    // reason -- so losing the old, now-wrong-sized buffer's content here is
+    // fine, not a partial-tile-patch-onto-garbage risk.
+    [framebufferPtr, framebufferCap] = ensureCapacity(framebufferPtr, framebufferCap, neededFbCap);
+  }
+
+  const ok = wasmModule.ccall('finlink_wasm_decode_video_frame', 'number',
+      ['number', 'number', 'number', 'number', 'number', 'number', 'number'],
+      [format, inflatedPtr, inflatedBytes.length, width, height, framebufferPtr, framebufferCap]);
+  if (!ok) return;
+
   if (imageData.width !== width || imageData.height !== height) {
     canvas.width = width; canvas.height = height;
     imageData = ctx.createImageData(width, height);
     resizeDesktopCanvas();
   }
+
+  // Always re-converts the *whole* persistent RGB565 framebuffer to the
+  // canvas's RGBA8 ImageData, even after a FINLINK_VIDEO_FORMAT_TILES frame
+  // that only patched part of it in WASM memory -- simpler than also
+  // tracking which tiles changed just to skip re-converting the rest, and
+  // cheap enough at GBA resolution (<=38400 pixels) that it's not worth that
+  // complexity. The *decode* into framebuffer_rgb565 above is still the
+  // real, correct partial-tile-patch semantics (finlink_decode_video_frame,
+  // shared with every other client) -- only this last RGB565->RGBA8
+  // color-space conversion is unconditionally whole-frame, the same way
+  // each platform's actual on-screen blit is its own platform-specific last
+  // step regardless (Android's Bitmap.Config.RGB_565 doesn't even need a
+  // conversion at all).
+  const fb = wasmModule.HEAPU8.subarray(framebufferPtr, framebufferPtr + width * height * 2);
+  const fbView = new DataView(fb.buffer, fb.byteOffset, fb.byteLength);
   const data = imageData.data;
-  const pixels = new DataView(raw);
-  // Two independent format bits (see VIDEO_FORMAT_* in GBAStreamHost.cpp):
-  // bit 0 (INDEXED) -- a per-frame palette (<=256 colors) plus one index
-  // byte per pixel instead of raw RGB565; bit 1 (TILES) -- only pixels of
-  // 8x8 tiles that changed since the last frame we actually rendered are
-  // present, each prefixed by a list of which tiles they are. Unset (0)
-  // is the original full-frame raw RGB565 this always used.
-  const TILE_SIZE = 8;
-  let offset = 0;
-  let tileCount = 0;
-  const tilesXCount = width / TILE_SIZE;
-  if (format & 2) {
-    tileCount = pixels.getUint16(offset, true);
-    offset += 2;
-  }
-  const tileIndices = new Uint16Array(tileCount);
-  for (let i = 0; i < tileCount; i++) {
-    tileIndices[i] = pixels.getUint16(offset, true);
-    offset += 2;
-  }
-  let palette = null;
-  if (format & 1) {
-    const paletteCount = pixels.getUint16(offset, true);
-    offset += 2;
-    palette = new Uint16Array(paletteCount);
-    for (let i = 0; i < paletteCount; i++) palette[i] = pixels.getUint16(offset + i * 2, true);
-    offset += paletteCount * 2;
-  }
-
-  function writePixel(destIndex, p) {
+  for (let i = 0; i < width * height; i++) {
+    const p = fbView.getUint16(i * 2, true);
     const r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
-    data[destIndex*4+0] = (r * 255 / 31) | 0;
-    data[destIndex*4+1] = (g * 255 / 63) | 0;
-    data[destIndex*4+2] = (b * 255 / 31) | 0;
-    data[destIndex*4+3] = 255;
-  }
-
-  if (format & 2) {
-    // Only the changed tiles' pixels are present; everywhere else in `data`
-    // already holds the right value from a previous frame, so only those
-    // tiles need to be (re-)written before the single putImageData below.
-    let srcIndex = 0;
-    for (const tileIndex of tileIndices) {
-      const tileX = (tileIndex % tilesXCount) * TILE_SIZE;
-      const tileY = Math.floor(tileIndex / tilesXCount) * TILE_SIZE;
-      for (let row = 0; row < TILE_SIZE; row++) {
-        for (let col = 0; col < TILE_SIZE; col++) {
-          const p = palette ? palette[pixels.getUint8(offset + srcIndex)] :
-                               pixels.getUint16(offset + srcIndex * 2, true);
-          writePixel((tileY + row) * width + (tileX + col), p);
-          srcIndex++;
-        }
-      }
-    }
-  } else {
-    for (let i = 0; i < width * height; i++) {
-      const p = palette ? palette[pixels.getUint8(offset + i)] : pixels.getUint16(offset + i * 2, true);
-      writePixel(i, p);
-    }
+    data[i * 4 + 0] = (r * 255 / 31) | 0;
+    data[i * 4 + 1] = (g * 255 / 63) | 0;
+    data[i * 4 + 2] = (b * 255 / 31) | 0;
+    data[i * 4 + 3] = 255;
   }
   ctx.putImageData(imageData, 0, 0);
-};
+}
+
+connect(location.hostname, port);
 
 function sendKeys() {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  const msg = new Uint8Array(3);
-  msg[0] = 2; msg[1] = keyState & 0xFF; msg[2] = (keyState >> 8) & 0xFF;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const bufPtr = wasmModule._malloc(3);
+  const n = wasmModule.ccall('finlink_wasm_build_input_frame', 'number', ['number', 'number'],
+                              [keyState, bufPtr]);
+  const msg = wasmModule.HEAPU8.slice(bufPtr, bufPtr + n);  // .slice() copies -- ws.send needs its
+                                                             // own bytes, not a view into memory
+                                                             // about to be freed below.
+  wasmModule._free(bufPtr);
   ws.send(msg);
 }
 
@@ -763,6 +960,29 @@ if (!isMobile) {
 </script>
 </body></html>
 )HTML";
+
+// Splices GBA_STREAM_WEB_CLIENT_JS between the two halves of the page above
+// (see the comment where GBA_STREAM_CLIENT_HTML_HEAD/_TAIL split) -- can't
+// be done at compile time as a single constexpr string_view the way the
+// unsplit page used to be, since the WASM module's JS isn't a compile-time
+// constant length known when this header itself is parsed... actually it
+// is (GBA_STREAM_WEB_CLIENT_JS is itself a generated compile-time
+// constant), but concatenating three std::string_views still needs runtime
+// allocation regardless, so this returns a plain std::string; callers
+// (GBAStreamLobby.cpp) already build an HTTP response with a runtime
+// Content-Length, so this fits that shape directly rather than fighting it.
+inline std::string BuildClientHtml()
+{
+  std::string html;
+  html.reserve(GBA_STREAM_CLIENT_HTML_HEAD.size() + GBA_STREAM_WEB_CLIENT_JS.size() +
+               GBA_STREAM_CLIENT_HTML_TAIL.size() + 32);
+  html.append(GBA_STREAM_CLIENT_HTML_HEAD);
+  html.append("<script>");
+  html.append(GBA_STREAM_WEB_CLIENT_JS);
+  html.append("</script>\n");
+  html.append(GBA_STREAM_CLIENT_HTML_TAIL);
+  return html;
+}
 
 }  // namespace HW::GBA
 
