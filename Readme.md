@@ -24,8 +24,9 @@ and button input travel over the network:
   connected, so it behaves exactly like **GBA (Integrated)** until a client
   attaches.
 - From another device on the same network (phone, tablet, another
-  computer), open `http://<dolphin-host-ip>:6800/` in a browser and pick a
-  free player slot. No app or installation needed on the client side.
+  computer, or a dedicated native client built against the same wire
+  protocol), open `http://<dolphin-host-ip>:6800/` in a browser and pick a
+  free player slot. No app or installation needed for the browser client.
 
 The web client is a single self-contained page with no build step and no
 external dependencies: fullscreen video sized to fit the window, an
@@ -33,11 +34,43 @@ on-screen D-pad/button overlay on touch devices (with optional Xbox/
 PlayStation-style game controller binding via the Gamepad API), and a
 keyboard-rebind panel on desktop.
 
+Each connected GBA slot gets its own WebSocket connection on `6800 +
+<device number>`, handled by a per-session reader thread (input, ping/pong,
+disconnect) and writer thread (video/audio), so a slow or congested link can
+delay outgoing frames without ever delaying newly-read input. Video frames
+are compressed in three stacked, lossless layers before being written to the
+socket: 8x8 tile diffing against the last frame actually sent (skips pixels
+that didn't change), optional per-frame palette/indexed-color encoding when
+a frame (or tile set) uses 256 colors or fewer, and raw deflate over the
+result. Audio is currently sent as uncompressed 16-bit PCM at the GBA's
+reported sample rate (typically 32768 Hz).
+
 This is LAN-only by design (no TLS, no authentication, no NAT traversal)
 and supports one connected client per player slot at a time. See the
 [latest release](https://github.com/alwe2710/dolphin-gba-stream/releases/latest)
 for a fuller rundown of what's included. Everything else in this README
 describes upstream Dolphin, which this fork otherwise tracks.
+
+### Building this fork
+
+No extra build steps beyond a normal Dolphin build: **GBA (Client-Stream)**
+lives entirely inside the existing `USE_MGBA` CMake option (`ON` by default),
+the same option that already gates **GBA (Integrated)** support, so:
+
+```sh
+git submodule update --init --recursive
+```
+
+is still the only thing you need before running the usual
+[Linux/macOS](#building-for-linux-and-macos),
+[Windows](#building-for-windows), or [Android](#building-for-android) build
+steps below — this pulls in `Externals/mGBA`, which both GBA device types
+require. The only additional dependency the fork's networking/compression
+code needs, `zlib`, is auto-detected like Dolphin's other bundled externals
+(system `zlib` if present and new enough, otherwise the vendored
+`Externals/zlib-ng` is built automatically) — nothing to install by hand.
+Building with `-DUSE_MGBA=OFF` compiles a Dolphin without either GBA device
+type, identical to how upstream behaves today.
 
 ## System Requirements
 
