@@ -470,7 +470,8 @@ ws.onmessage = async (ev) => {
   const seq = ++latestVideoSeq;
   const width = view.getUint32(1, true);
   const height = view.getUint32(5, true);
-  const compressed = ev.data.slice(9);
+  const format = view.getUint8(9);
+  const compressed = ev.data.slice(10);
   const raw = await new Response(
       new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
   ).arrayBuffer();
@@ -482,20 +483,71 @@ ws.onmessage = async (ev) => {
     updateStats();
   }
   lastFrameAt = now;
-  const pixels = new DataView(raw);
   if (imageData.width !== width || imageData.height !== height) {
     canvas.width = width; canvas.height = height;
     imageData = ctx.createImageData(width, height);
     resizeDesktopCanvas();
   }
   const data = imageData.data;
-  for (let i = 0; i < width * height; i++) {
-    const p = pixels.getUint16(i * 2, true);
+  const pixels = new DataView(raw);
+  // Two independent format bits (see VIDEO_FORMAT_* in GBAStreamHost.cpp):
+  // bit 0 (INDEXED) -- a per-frame palette (<=256 colors) plus one index
+  // byte per pixel instead of raw RGB565; bit 1 (TILES) -- only pixels of
+  // 8x8 tiles that changed since the last frame we actually rendered are
+  // present, each prefixed by a list of which tiles they are. Unset (0)
+  // is the original full-frame raw RGB565 this always used.
+  const TILE_SIZE = 8;
+  let offset = 0;
+  let tileCount = 0;
+  const tilesXCount = width / TILE_SIZE;
+  if (format & 2) {
+    tileCount = pixels.getUint16(offset, true);
+    offset += 2;
+  }
+  const tileIndices = new Uint16Array(tileCount);
+  for (let i = 0; i < tileCount; i++) {
+    tileIndices[i] = pixels.getUint16(offset, true);
+    offset += 2;
+  }
+  let palette = null;
+  if (format & 1) {
+    const paletteCount = pixels.getUint16(offset, true);
+    offset += 2;
+    palette = new Uint16Array(paletteCount);
+    for (let i = 0; i < paletteCount; i++) palette[i] = pixels.getUint16(offset + i * 2, true);
+    offset += paletteCount * 2;
+  }
+
+  function writePixel(destIndex, p) {
     const r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
-    data[i*4+0] = (r * 255 / 31) | 0;
-    data[i*4+1] = (g * 255 / 63) | 0;
-    data[i*4+2] = (b * 255 / 31) | 0;
-    data[i*4+3] = 255;
+    data[destIndex*4+0] = (r * 255 / 31) | 0;
+    data[destIndex*4+1] = (g * 255 / 63) | 0;
+    data[destIndex*4+2] = (b * 255 / 31) | 0;
+    data[destIndex*4+3] = 255;
+  }
+
+  if (format & 2) {
+    // Only the changed tiles' pixels are present; everywhere else in `data`
+    // already holds the right value from a previous frame, so only those
+    // tiles need to be (re-)written before the single putImageData below.
+    let srcIndex = 0;
+    for (const tileIndex of tileIndices) {
+      const tileX = (tileIndex % tilesXCount) * TILE_SIZE;
+      const tileY = Math.floor(tileIndex / tilesXCount) * TILE_SIZE;
+      for (let row = 0; row < TILE_SIZE; row++) {
+        for (let col = 0; col < TILE_SIZE; col++) {
+          const p = palette ? palette[pixels.getUint8(offset + srcIndex)] :
+                               pixels.getUint16(offset + srcIndex * 2, true);
+          writePixel((tileY + row) * width + (tileX + col), p);
+          srcIndex++;
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < width * height; i++) {
+      const p = palette ? palette[pixels.getUint8(offset + i)] : pixels.getUint16(offset + i * 2, true);
+      writePixel(i, p);
+    }
   }
   ctx.putImageData(imageData, 0, 0);
 };

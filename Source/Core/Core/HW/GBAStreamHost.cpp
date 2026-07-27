@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include <zlib.h>
@@ -61,6 +62,31 @@ constexpr u8 MSG_TYPE_AUDIO = 0x03;
 constexpr u8 MSG_TYPE_PING = 0x04;
 constexpr u8 MSG_TYPE_PONG = 0x05;
 
+// Video frame sub-format, sent as one extra byte right after width/height
+// (see SendVideoFrameIfPending). Two independent bits:
+//  - VIDEO_FORMAT_INDEXED: pixels are a per-frame palette (<=256 entries)
+//    plus one index byte each, instead of raw RGB565; falls back to unset
+//    (raw) whenever a frame/tile-set actually uses more than 256 colors.
+//  - VIDEO_FORMAT_TILES: only pixels belonging to 8x8 tiles that changed
+//    since the last *sent* frame are included, each prefixed by which tile
+//    it is; unset means every pixel is present (the first frame after
+//    connect always is, since there's nothing yet to diff against).
+// Payload layout once decompressed:
+//   [ if TILES: u16 tile_count, tile_count * u16 tile_index ]
+//   [ if INDEXED: u16 palette_count, palette_count * u16 rgb565 ]
+//   pixel data: (tile_count * TILE_SIZE * TILE_SIZE) or (width * height)
+//               pixels, each one u8 palette index (INDEXED) or u16 rgb565
+//               (not INDEXED); tile pixels are row-major within each tile,
+//               tiles appear in the same order as their indices above.
+constexpr u8 VIDEO_FORMAT_RAW = 0x00;
+constexpr u8 VIDEO_FORMAT_INDEXED = 0x01;
+constexpr u8 VIDEO_FORMAT_TILES = 0x02;
+constexpr size_t MAX_PALETTE_COLORS = 256;
+
+// 8x8 evenly divides the fixed 240x160 GBA screen (30x20 tiles) with no
+// remainder, so tile position math never needs to handle a partial edge tile.
+constexpr u32 TILE_SIZE = 8;
+
 // Remote key bitmask layout (client->server). Chosen to mirror the bit order
 // SI_DeviceGBAEmu::GetData() already uses for the internal GBA keypad word,
 // purely for readability -- this is our own wire protocol, not mGBA's ABI.
@@ -75,12 +101,72 @@ constexpr u16 KEY_DOWN = 1 << 7;
 constexpr u16 KEY_R = 1 << 8;
 constexpr u16 KEY_L = 1 << 9;
 
+void AppendU16LE(std::vector<u8>* out, u16 value)
+{
+  out->push_back(static_cast<u8>(value & 0xFF));
+  out->push_back(static_cast<u8>((value >> 8) & 0xFF));
+}
+
 void AppendU32LE(std::vector<u8>* out, u32 value)
 {
   out->push_back(static_cast<u8>(value & 0xFF));
   out->push_back(static_cast<u8>((value >> 8) & 0xFF));
   out->push_back(static_cast<u8>((value >> 16) & 0xFF));
   out->push_back(static_cast<u8>((value >> 24) & 0xFF));
+}
+
+struct EncodedPixels
+{
+  bool indexed;
+  std::vector<u8> payload;
+};
+
+// Builds the pixel portion of a video frame message (see the VIDEO_FORMAT_*
+// comment above) from a run of `pixel_count` RGB565 pixels -- either the
+// whole frame or just the gathered pixels of its changed tiles, the caller
+// doesn't need to differ here. Tries a per-frame palette first since GBA
+// tile-mode content rarely uses more than a handful of colors at once; falls
+// back to the raw bytes untouched if this particular pixel run happens to
+// use more than 256 distinct colors (bitmap modes, heavy blending, or -- in
+// the tiles case -- an unusually large, colorful set of changed tiles).
+EncodedPixels EncodePixelsWithOptionalPalette(const std::vector<u8>& rgb565, size_t pixel_count)
+{
+  std::vector<u16> palette;
+  std::vector<u8> indices(pixel_count);
+  std::unordered_map<u16, u8> color_to_index;
+  bool use_palette = true;
+  for (size_t i = 0; i < pixel_count && use_palette; ++i)
+  {
+    const u16 color = static_cast<u16>(rgb565[i * 2]) | (static_cast<u16>(rgb565[i * 2 + 1]) << 8);
+    auto [it, inserted] = color_to_index.try_emplace(color, 0);
+    if (inserted)
+    {
+      if (palette.size() >= MAX_PALETTE_COLORS)
+      {
+        use_palette = false;
+        break;
+      }
+      it->second = static_cast<u8>(palette.size());
+      palette.push_back(color);
+    }
+    indices[i] = it->second;
+  }
+
+  EncodedPixels result;
+  result.indexed = use_palette;
+  if (use_palette)
+  {
+    result.payload.reserve(2 + palette.size() * 2 + indices.size());
+    AppendU16LE(&result.payload, static_cast<u16>(palette.size()));
+    for (const u16 color : palette)
+      AppendU16LE(&result.payload, color);
+    result.payload.insert(result.payload.end(), indices.begin(), indices.end());
+  }
+  else
+  {
+    result.payload.assign(rgb565.begin(), rgb565.begin() + static_cast<ptrdiff_t>(pixel_count * 2));
+  }
+  return result;
 }
 
 std::vector<u8> DeflateRaw(const std::vector<u8>& input)
@@ -464,8 +550,6 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
 
   std::vector<u8> recv_buffer;
   std::array<u8, 4096> read_buf{};
-  u64 last_sent_frame_id = 0;
-  std::vector<u8> previous_rgb565;
 
   m_remote_keys = 0;
   {
@@ -473,6 +557,41 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
     m_pending_audio.clear();
   }
   m_client_connected = true;
+
+  // Guards every send on this socket (video/audio from the writer thread
+  // below, plus this thread's own inline pong replies) so the two threads can
+  // never interleave bytes mid-frame on the wire -- SendAllBytes' retry loop
+  // assumes it's the sole writer for the duration of one logical message.
+  // Deliberately does NOT guard receive(): reading and applying fresh input
+  // must never wait on a stuck send, which is the whole point of this split.
+  // Safe to use alongside concurrent receive() on the same socket only
+  // because this feature never enables TLS (plain ws://, never wss://) --
+  // SFML's raw send()/receive() overloads touch no shared instance state in
+  // that case. Revisit this if wss:// support is ever added.
+  std::mutex send_mutex;
+  std::atomic_bool session_stop{false};
+
+  // Dedicated to draining pending video/audio so a send stalled by a
+  // congested/lossy link (bounded by SendAllBytes' own 3s deadline) can never
+  // delay reading/applying new input or replying to pings on the thread
+  // below -- previously both were serialized on one thread, so a slow frame
+  // send doubled as input lag. Poll cadence matches the original combined
+  // loop's 4ms.
+  std::thread writer_thread([this, &socket, &send_mutex, &session_stop] {
+    u64 last_sent_frame_id = 0;
+    std::vector<u8> previous_rgb565;
+    while (!m_stop && !session_stop)
+    {
+      {
+        std::lock_guard<std::mutex> lock(send_mutex);
+        SendVideoFrameIfPending(socket, &last_sent_frame_id, &previous_rgb565);
+        SendAudioIfPending(socket);
+      }
+      if (m_stop || session_stop)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
+  });
 
   while (!m_stop)
   {
@@ -515,6 +634,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
             pong.reserve(9);
             pong.push_back(MSG_TYPE_PONG);
             pong.insert(pong.end(), frame->payload.begin() + 1, frame->payload.end());
+            std::lock_guard<std::mutex> lock(send_mutex);
             SendWebSocketBinaryFrame(socket, pong, m_stop);
           }
         }
@@ -522,10 +642,10 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
           break;
       }
     }
-
-    SendVideoFrameIfPending(socket, &last_sent_frame_id, &previous_rgb565);
-    SendAudioIfPending(socket);
   }
+
+  session_stop = true;
+  writer_thread.join();
 
   CloseGracefully(socket, m_stop);
   m_client_connected = false;
@@ -567,13 +687,98 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
   if (rgb565 == *previous_rgb565)
     return;
 
-  const std::vector<u8> compressed = DeflateRaw(rgb565);
+  // GBA content typically only changes a fraction of the screen per frame
+  // (HUD/background stay put while sprites move or a small area scrolls), so
+  // resending all 240x160 pixels every time this differs from the last
+  // *sent* frame at all wastes most of the message on pixels the client
+  // already has correctly on screen. Diffing in 8x8 tiles against
+  // *previous_rgb565 finds just the changed ones; `have_previous` is false
+  // only right after connect (previous_rgb565 starts empty), which is
+  // exactly when a full frame is needed anyway to give the client something
+  // to diff against in the first place.
+  const bool have_previous = previous_rgb565->size() == rgb565.size();
+  const u32 tiles_x = width / TILE_SIZE;
+  const u32 tiles_y = height / TILE_SIZE;
+
+  std::vector<u16> changed_tiles;
+  std::vector<u8> tile_pixels;
+  if (have_previous)
+  {
+    for (u32 ty = 0; ty < tiles_y; ++ty)
+    {
+      for (u32 tx = 0; tx < tiles_x; ++tx)
+      {
+        bool tile_changed = false;
+        for (u32 row = 0; row < TILE_SIZE; ++row)
+        {
+          const auto row_offset = static_cast<ptrdiff_t>(
+              (static_cast<size_t>(ty * TILE_SIZE + row) * width + tx * TILE_SIZE) * 2);
+          if (!std::equal(rgb565.begin() + row_offset,
+                          rgb565.begin() + row_offset + TILE_SIZE * 2,
+                          previous_rgb565->begin() + row_offset))
+          {
+            tile_changed = true;
+            break;
+          }
+        }
+        if (tile_changed)
+          changed_tiles.push_back(static_cast<u16>(ty * tiles_x + tx));
+      }
+    }
+
+    if (changed_tiles.empty())
+      return;  // Bit-identical to the last sent frame (handled per-tile) -- nothing to send.
+
+    tile_pixels.resize(changed_tiles.size() * TILE_SIZE * TILE_SIZE * 2);
+    size_t out = 0;
+    for (const u16 tile_index : changed_tiles)
+    {
+      const u32 tx = tile_index % tiles_x;
+      const u32 ty = tile_index / tiles_x;
+      for (u32 row = 0; row < TILE_SIZE; ++row)
+      {
+        const auto row_offset = static_cast<ptrdiff_t>(
+            (static_cast<size_t>(ty * TILE_SIZE + row) * width + tx * TILE_SIZE) * 2);
+        std::copy(rgb565.begin() + row_offset, rgb565.begin() + row_offset + TILE_SIZE * 2,
+                  tile_pixels.begin() + static_cast<ptrdiff_t>(out));
+        out += TILE_SIZE * 2;
+      }
+    }
+  }
+
+  // Sending only changed tiles costs 2 extra header bytes per tile for its
+  // index -- worth it unless enough of the screen changed at once (e.g. a
+  // full-screen fade) that the overhead exceeds just resending everything.
+  const bool use_tiles =
+      have_previous && changed_tiles.size() * (TILE_SIZE * TILE_SIZE * 2 + 2) < rgb565.size();
+
+  const EncodedPixels encoded =
+      use_tiles ?
+          EncodePixelsWithOptionalPalette(tile_pixels,
+                                          changed_tiles.size() * TILE_SIZE * TILE_SIZE) :
+          EncodePixelsWithOptionalPalette(rgb565, static_cast<size_t>(width) * height);
+
+  std::vector<u8> payload;
+  if (use_tiles)
+  {
+    payload.reserve(2 + changed_tiles.size() * 2 + encoded.payload.size());
+    AppendU16LE(&payload, static_cast<u16>(changed_tiles.size()));
+    for (const u16 tile_index : changed_tiles)
+      AppendU16LE(&payload, tile_index);
+  }
+  payload.insert(payload.end(), encoded.payload.begin(), encoded.payload.end());
+
+  const u8 format = static_cast<u8>((encoded.indexed ? VIDEO_FORMAT_INDEXED : VIDEO_FORMAT_RAW) |
+                                    (use_tiles ? VIDEO_FORMAT_TILES : 0));
+
+  const std::vector<u8> compressed = DeflateRaw(payload);
 
   std::vector<u8> message;
-  message.reserve(9 + compressed.size());
+  message.reserve(10 + compressed.size());
   message.push_back(MSG_TYPE_VIDEO_FRAME);
   AppendU32LE(&message, width);
   AppendU32LE(&message, height);
+  message.push_back(format);
   message.insert(message.end(), compressed.begin(), compressed.end());
 
   if (SendWebSocketBinaryFrame(socket, message, m_stop))
