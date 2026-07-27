@@ -745,12 +745,17 @@ if(USE_MGBA)
   target_sources(core PRIVATE
     HW/GBACore.cpp
     HW/GBACore.h
+    HW/GBAStreamBeacon.cpp
+    HW/GBAStreamBeacon.h
     HW/GBAStreamClientPage.h
+    HW/GBAStreamHandshake.cpp
+    HW/GBAStreamHandshake.h
     HW/GBAStreamHost.cpp
     HW/GBAStreamHost.h
     HW/GBAStreamLobby.cpp
     HW/GBAStreamLobby.h
     HW/GBAStreamNetUtil.h
+    HW/GBAStreamWebSocket.h
     HW/SI/SI_DeviceGBAEmu.cpp
     HW/SI/SI_DeviceGBAEmu.h
   )

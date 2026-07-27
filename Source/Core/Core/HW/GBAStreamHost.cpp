@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <chrono>
 #include <map>
 #include <optional>
@@ -20,20 +19,19 @@
 
 #include <zlib.h>
 
-#include <mbedtls/base64.h>
-
 #include <SFML/Network/SocketSelector.hpp>
 #include <SFML/System/Time.hpp>
 
 #include "Common/CommonTypes.h"
-#include "Common/Crypto/SHA1.h"
 #include "Common/Logging/Log.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GBAPadEmu.h"
+#include "Core/HW/GBAStreamHandshake.h"
 #include "Core/HW/GBAStreamLobby.h"
 #include "Core/HW/GBAStreamNetUtil.h"
+#include "Core/HW/GBAStreamWebSocket.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
 
@@ -169,6 +167,30 @@ EncodedPixels EncodePixelsWithOptionalPalette(const std::vector<u8>& rgb565, siz
   return result;
 }
 
+// Nearest-neighbor downscale from (src_width, src_height) to (dst_width,
+// dst_height), both RGB565 row-major. Only used when a client's negotiated
+// resolution (GBAStreamHandshake.h's NegotiateVideo) is below native -- GBA
+// content is small pixel art to begin with, so a cheap point-sample resize is
+// a fine tradeoff against a real filter's extra CPU time on every frame.
+std::vector<u8> DownscaleRgb565(const std::vector<u8>& src, u32 src_width, u32 src_height,
+                                u32 dst_width, u32 dst_height)
+{
+  std::vector<u8> dst(static_cast<size_t>(dst_width) * dst_height * 2);
+  for (u32 y = 0; y < dst_height; ++y)
+  {
+    const u32 src_y = std::min(src_height - 1, y * src_height / dst_height);
+    for (u32 x = 0; x < dst_width; ++x)
+    {
+      const u32 src_x = std::min(src_width - 1, x * src_width / dst_width);
+      const size_t src_index = (static_cast<size_t>(src_y) * src_width + src_x) * 2;
+      const size_t dst_index = (static_cast<size_t>(y) * dst_width + x) * 2;
+      dst[dst_index] = src[src_index];
+      dst[dst_index + 1] = src[src_index + 1];
+    }
+  }
+  return dst;
+}
+
 std::vector<u8> DeflateRaw(const std::vector<u8>& input)
 {
   z_stream strm{};
@@ -193,118 +215,10 @@ std::vector<u8> DeflateRaw(const std::vector<u8>& input)
   return out;
 }
 
-struct WebSocketFrame
-{
-  u8 opcode;
-  std::vector<u8> payload;
-  size_t consumed;
-};
-
-constexpr u8 OPCODE_BINARY = 0x2;
-constexpr u8 OPCODE_CLOSE = 0x8;
-
-// Our own client (GBAStreamClientPage.h) never sends anything bigger than a
-// 3-byte input message, so this is generous headroom, not a real limit -- it
-// exists purely so a malformed or hostile peer can't claim an absurd 64-bit
-// length. Without a cap, `pos + len` below (size_t arithmetic) can overflow
-// and wrap back into a small value, making the "is the full frame buffered
-// yet" check pass despite `buf` actually holding far fewer bytes than
-// claimed -- the unmasking loop then reads out of bounds, and even if it
-// didn't, `frame.payload.resize(len)` would attempt an unbounded allocation.
-constexpr u64 MAX_WEBSOCKET_FRAME_PAYLOAD = 1 << 20;  // 1 MiB
-
-// Parses at most one client->server (masked) WebSocket frame from the front
-// of `buf`. Returns nullopt if `buf` doesn't yet contain a full frame -- the
-// caller should wait for more data and retry. Fragmented frames (FIN=0) are
-// not supported: our client never sends them, so treat one as a protocol
-// error (handled the same as a close frame by the caller). An oversized
-// declared length is treated the same way (see MAX_WEBSOCKET_FRAME_PAYLOAD).
-std::optional<WebSocketFrame> TryParseWebSocketFrame(const std::vector<u8>& buf)
-{
-  if (buf.size() < 2)
-    return std::nullopt;
-
-  const u8 b0 = buf[0];
-  const u8 b1 = buf[1];
-  const u8 opcode = b0 & 0x0F;
-  const bool masked = (b1 & 0x80) != 0;
-  u64 len = b1 & 0x7F;
-  size_t pos = 2;
-
-  if (len == 126)
-  {
-    if (buf.size() < 4)
-      return std::nullopt;
-    len = (static_cast<u64>(buf[2]) << 8) | buf[3];
-    pos = 4;
-  }
-  else if (len == 127)
-  {
-    if (buf.size() < 10)
-      return std::nullopt;
-    len = 0;
-    for (int i = 0; i < 8; ++i)
-      len = (len << 8) | buf[2 + i];
-    pos = 10;
-  }
-
-  if (len > MAX_WEBSOCKET_FRAME_PAYLOAD)
-  {
-    WebSocketFrame frame;
-    frame.opcode = OPCODE_CLOSE;
-    frame.consumed = buf.size();
-    return frame;
-  }
-
-  std::array<u8, 4> mask_key{};
-  if (masked)
-  {
-    if (buf.size() < pos + 4)
-      return std::nullopt;
-    std::copy_n(buf.begin() + pos, 4, mask_key.begin());
-    pos += 4;
-  }
-
-  if (buf.size() < pos + len)
-    return std::nullopt;
-
-  WebSocketFrame frame;
-  frame.opcode = opcode;
-  frame.payload.resize(len);
-  for (u64 i = 0; i < len; ++i)
-    frame.payload[i] = buf[pos + i] ^ (masked ? mask_key[i % 4] : u8{0});
-  frame.consumed = pos + len;
-  return frame;
-}
-
-bool SendWebSocketBinaryFrame(sf::TcpSocket& socket, const std::vector<u8>& payload,
-                              const std::atomic_bool& stop_flag)
-{
-  std::vector<u8> frame;
-  frame.reserve(payload.size() + 10);
-  frame.push_back(0x82);  // FIN=1, opcode=2 (binary). Server frames are unmasked.
-
-  const size_t len = payload.size();
-  if (len < 126)
-  {
-    frame.push_back(static_cast<u8>(len));
-  }
-  else if (len <= 0xFFFF)
-  {
-    frame.push_back(126);
-    frame.push_back(static_cast<u8>((len >> 8) & 0xFF));
-    frame.push_back(static_cast<u8>(len & 0xFF));
-  }
-  else
-  {
-    frame.push_back(127);
-    for (int shift = 56; shift >= 0; shift -= 8)
-      frame.push_back(static_cast<u8>((static_cast<u64>(len) >> shift) & 0xFF));
-  }
-  frame.insert(frame.end(), payload.begin(), payload.end());
-
-  return SendAllBytes(socket, frame.data(), frame.size(), stop_flag);
-}
+// WebSocketFrame, TryParseWebSocketFrame, SendWebSocketBinaryFrame and the
+// OPCODE_* constants used to live here; they moved to GBAStreamWebSocket.h
+// (as WS_OPCODE_*) once GBAStreamLobby needed the same WebSocket transport
+// for the app-level handshake, rather than duplicating them there.
 
 }  // namespace
 
@@ -338,8 +252,42 @@ std::vector<int> GBAStreamHost::CheckPortsInUse()
   return busy_ports;
 }
 
+std::mutex GBAStreamHost::s_registry_mutex;
+std::array<GBAStreamHost*, 4> GBAStreamHost::s_instances{};
+
+bool GBAStreamHost::IsSlotOccupied(int device_number)
+{
+  std::lock_guard<std::mutex> lock(s_registry_mutex);
+  if (device_number < 0 || device_number >= static_cast<int>(s_instances.size()))
+    return false;
+  const GBAStreamHost* host = s_instances[static_cast<size_t>(device_number)];
+  return host != nullptr && host->m_client_connected.load();
+}
+
+std::string GBAStreamHost::GetSlotLabel(int device_number)
+{
+  return "P" + std::to_string(device_number + 1);
+}
+
+HandshakeAudioInfo GBAStreamHost::GetNativeAudioInfo(int device_number)
+{
+  std::lock_guard<std::mutex> registry_lock(s_registry_mutex);
+  if (device_number < 0 || device_number >= static_cast<int>(s_instances.size()))
+    return HandshakeAudioInfo{32768, 2};
+  GBAStreamHost* host = s_instances[static_cast<size_t>(device_number)];
+  if (!host)
+    return HandshakeAudioInfo{32768, 2};
+  std::lock_guard<std::mutex> audio_lock(host->m_audio_mutex);
+  return HandshakeAudioInfo{host->m_audio_sample_rate.load(), static_cast<u8>(host->m_audio_channels)};
+}
+
 GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
 {
+  {
+    std::lock_guard<std::mutex> lock(s_registry_mutex);
+    s_instances[static_cast<size_t>(device_number)] = this;
+  }
+
   // Keeps the always-on lobby page (fixed port 6800) running for as long as
   // at least one GC port is configured as GBA (Client-Stream), regardless of
   // which port(s) those are.
@@ -359,6 +307,16 @@ GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
 
 GBAStreamHost::~GBAStreamHost()
 {
+  // Unregister first, under s_registry_mutex, before anything below starts
+  // tearing down this instance's own state -- see the s_instances comment in
+  // the header for why this ordering is what makes IsSlotOccupied() safe to
+  // call concurrently from another thread (GBAStreamLobby's) throughout the
+  // rest of this destructor.
+  {
+    std::lock_guard<std::mutex> lock(s_registry_mutex);
+    s_instances[static_cast<size_t>(m_device_number)] = nullptr;
+  }
+
   m_stop = true;
   m_listener.close();
   if (m_accept_thread.joinable())
@@ -415,6 +373,12 @@ void GBAStreamHost::ServeConnection(sf::TcpSocket& socket)
   if (!PerformHandshake(socket, &is_websocket) || !is_websocket)
     return;
 
+  // App-level handshake (GBAStreamHandshake.h): must succeed -- version match,
+  // this slot requested and free -- before any Video/Audio/Input binary frame
+  // is allowed on this connection. Populates m_negotiated_* on success.
+  if (!PerformAppHandshake(socket))
+    return;
+
   AttachInputOverride();
   RunWebSocketSession(socket);
   DetachInputOverride();
@@ -424,61 +388,12 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
 {
   *is_websocket = false;
 
-  std::string request;
-  std::array<char, 4096> buf{};
-  while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384)
-  {
-    if (m_stop)
-      return false;
-    size_t received = 0;
-    const auto status = socket.receive(buf.data(), buf.size(), received);
-    if (status == sf::Socket::Status::NotReady)
-    {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      continue;
-    }
-    if (status != sf::Socket::Status::Done || received == 0)
-      return false;
-    request.append(buf.data(), received);
-  }
-  if (request.find("\r\n\r\n") == std::string::npos)
+  const auto request_opt = ReadHttpRequest(socket, m_stop);
+  if (!request_opt)
     return false;
-
-  std::string path;
-  std::map<std::string, std::string> headers;
-  {
-    std::istringstream stream(request);
-    std::string request_line;
-    std::getline(stream, request_line);
-    {
-      const auto first_space = request_line.find(' ');
-      const auto second_space = first_space == std::string::npos ?
-                                    std::string::npos :
-                                    request_line.find(' ', first_space + 1);
-      if (first_space != std::string::npos && second_space != std::string::npos)
-        path = request_line.substr(first_space + 1, second_space - first_space - 1);
-    }
-    std::string line;
-    while (std::getline(stream, line) && line != "\r" && !line.empty())
-    {
-      const auto colon = line.find(':');
-      if (colon == std::string::npos)
-        continue;
-      std::string key = line.substr(0, colon);
-      std::string value = line.substr(colon + 1);
-      while (!value.empty() && value.front() == ' ')
-        value.erase(value.begin());
-      while (!value.empty() && (value.back() == '\r' || value.back() == '\n'))
-        value.pop_back();
-      std::transform(key.begin(), key.end(), key.begin(),
-                     [](unsigned char c) { return std::tolower(c); });
-      headers[key] = value;
-    }
-  }
-
-  std::string upgrade = headers.count("upgrade") ? headers["upgrade"] : "";
-  std::transform(upgrade.begin(), upgrade.end(), upgrade.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
+  const HttpRequest& request = *request_opt;
+  const std::string& path = request.path;
+  const std::map<std::string, std::string>& headers = request.headers;
 
   if (path == "/status")
   {
@@ -502,12 +417,16 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
     return true;
   }
 
-  if (upgrade != "websocket" || !headers.count("sec-websocket-key"))
+  if (!IsWebSocketUpgradeRequest(request))
   {
     // Player ports are API-only (status + WebSocket); send anyone who
     // navigates here directly (e.g. an old bookmark) to the lobby (fixed
-    // port 6800) instead of duplicating its page here.
-    std::string host = headers.count("host") ? headers["host"] : "localhost";
+    // port 6800) instead of duplicating its page here. (Since protocol
+    // version 2, the lobby no longer serves an HTML page either -- it now
+    // speaks the same app-level handshake as this port, see
+    // GBAStreamLobby.cpp -- but redirecting a stray plain-HTTP request there
+    // is still more useful than a bare error.)
+    std::string host = headers.count("host") ? headers.at("host") : "localhost";
     const auto colon = host.find(':');
     if (colon != std::string::npos)
       host.resize(colon);
@@ -522,24 +441,112 @@ bool GBAStreamHost::PerformHandshake(sf::TcpSocket& socket, bool* is_websocket)
     return true;
   }
 
-  const std::string concatenated =
-      headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-  const auto digest = Common::SHA1::CalculateDigest(concatenated);
-  std::array<unsigned char, 64> b64{};
-  size_t b64_len = 0;
-  mbedtls_base64_encode(b64.data(), b64.size(), &b64_len, digest.data(), digest.size());
-
-  std::ostringstream response;
-  response << "HTTP/1.1 101 Switching Protocols\r\n"
-           << "Upgrade: websocket\r\n"
-           << "Connection: Upgrade\r\n"
-           << "Sec-WebSocket-Accept: " << std::string(reinterpret_cast<char*>(b64.data()), b64_len)
-           << "\r\n\r\n";
-  const std::string response_str = response.str();
-  if (!SendAllBytes(socket, response_str.data(), response_str.size(), m_stop))
+  if (!SendWebSocketUpgradeResponse(socket, request, m_stop))
     return false;
 
   *is_websocket = true;
+  return true;
+}
+
+namespace
+{
+// How long PerformAppHandshake waits for hello_ack before giving up on this
+// connection -- generous for a LAN round-trip, short enough that a client
+// that connected but never speaks the handshake (e.g. an old, pre-protocol-2
+// client, or a stray non-finlink connection) doesn't tie up this slot.
+constexpr std::chrono::milliseconds APP_HANDSHAKE_TIMEOUT{3000};
+}  // namespace
+
+bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
+{
+  u32 native_sample_rate;
+  u8 native_channels;
+  {
+    std::lock_guard<std::mutex> lock(m_audio_mutex);
+    native_sample_rate = m_audio_sample_rate.load();
+    native_channels = static_cast<u8>(m_audio_channels);
+  }
+
+  HandshakeOffer offer;
+  offer.stream_type = kStreamTypeGcGbaLink;
+  offer.slots = {HandshakeSlot{m_device_number, GetSlotLabel(m_device_number),
+                               m_client_connected.load()}};
+  offer.video_width = GBA_NATIVE_WIDTH;
+  offer.video_height = GBA_NATIVE_HEIGHT;
+  offer.video_fps = GBA_NATIVE_FPS;
+  offer.audio = HandshakeAudioInfo{native_sample_rate, native_channels};
+  offer.input_encoding = "gba_buttons";
+
+  if (!SendWebSocketTextFrame(socket, BuildHelloMessage(offer), m_stop))
+    return false;
+
+  const auto frame = ReceiveOneWebSocketFrame(socket, m_stop, APP_HANDSHAKE_TIMEOUT);
+  if (!frame || frame->opcode != WS_OPCODE_TEXT)
+    return false;  // Timed out, disconnected, or sent something other than
+                    // the expected single JSON text frame -- nothing
+                    // meaningful to reply an error to at this point.
+
+  const auto ack = ParseHelloAck(frame->payload);
+  if (!ack)
+  {
+    SendWebSocketTextFrame(
+        socket, BuildHandshakeErrorMessage(HandshakeErrorCode::MalformedRequest,
+                                           "hello_ack konnte nicht gelesen werden."),
+        m_stop);
+    return false;
+  }
+  if (ack->protocol_version != GBA_STREAM_PROTOCOL_VERSION)
+  {
+    SendWebSocketTextFrame(
+        socket,
+        BuildHandshakeErrorMessage(
+            HandshakeErrorCode::VersionMismatch,
+            "Server spricht Protokollversion " + std::to_string(GBA_STREAM_PROTOCOL_VERSION) +
+                ", Client meldet " + std::to_string(ack->protocol_version) + "."),
+        m_stop);
+    return false;
+  }
+  if (ack->requested_slot != m_device_number)
+  {
+    SendWebSocketTextFrame(
+        socket,
+        BuildHandshakeErrorMessage(HandshakeErrorCode::MalformedRequest,
+                                   "Dieser Port bedient nur Slot " +
+                                       std::to_string(m_device_number) + "."),
+        m_stop);
+    return false;
+  }
+  if (m_client_connected.load())
+  {
+    SendWebSocketTextFrame(
+        socket,
+        BuildHandshakeErrorMessage(HandshakeErrorCode::SlotUnavailable,
+                                   "Slot " + GetSlotLabel(m_device_number) +
+                                       " wurde inzwischen von einem anderen Client belegt."),
+        m_stop);
+    return false;
+  }
+
+  const NegotiatedVideo negotiated_video =
+      NegotiateVideo(GBA_NATIVE_WIDTH, GBA_NATIVE_HEIGHT, GBA_NATIVE_FPS, ack->video_limits);
+  std::optional<NegotiatedAudio> negotiated_audio;
+  if (ack->audio_limits)
+    negotiated_audio = NegotiateAudio(native_sample_rate, native_channels, *ack->audio_limits);
+
+  if (!SendWebSocketTextFrame(
+          socket, BuildSessionReadyMessage(m_device_number, negotiated_video, negotiated_audio,
+                                           std::nullopt /* redirect: this is the terminal port */),
+          m_stop))
+  {
+    return false;
+  }
+
+  m_negotiated_width = negotiated_video.width;
+  m_negotiated_height = negotiated_video.height;
+  m_negotiated_fps = negotiated_video.fps;
+  m_audio_enabled = negotiated_audio.has_value();
+  m_negotiated_audio_channels = negotiated_audio ? negotiated_audio->channels : native_channels;
+  m_last_video_send_time = std::chrono::steady_clock::time_point{};
   return true;
 }
 
@@ -615,19 +622,19 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
           recv_buffer.erase(recv_buffer.begin(),
                             recv_buffer.begin() + static_cast<ptrdiff_t>(frame->consumed));
 
-          if (frame->opcode == OPCODE_CLOSE)
+          if (frame->opcode == WS_OPCODE_CLOSE)
           {
             disconnect_requested = true;
             break;
           }
-          if (frame->opcode == OPCODE_BINARY && frame->payload.size() == 3 &&
+          if (frame->opcode == WS_OPCODE_BINARY && frame->payload.size() == 3 &&
               frame->payload[0] == MSG_TYPE_INPUT)
           {
             const u16 keys =
                 static_cast<u16>(frame->payload[1]) | (static_cast<u16>(frame->payload[2]) << 8);
             m_remote_keys.store(keys);
           }
-          else if (frame->opcode == OPCODE_BINARY && frame->payload.size() == 9 &&
+          else if (frame->opcode == WS_OPCODE_BINARY && frame->payload.size() == 9 &&
                    frame->payload[0] == MSG_TYPE_PING)
           {
             std::vector<u8> pong;
@@ -668,6 +675,22 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
     *last_sent_frame_id = m_frame_id;
   }
 
+  // Frame-rate cap negotiated in PerformAppHandshake (m_negotiated_fps <
+  // native = client asked for less than the GBA's native ~59.7275 Hz).
+  // Independent of the pixel-diff dedup further down: this gates purely on
+  // wall-clock time since the last frame actually *sent*, which also
+  // naturally saves the pixel-conversion/diff work below for a throttled
+  // session. Skipped entirely -- zero added latency -- when native FPS was
+  // negotiated, the overwhelmingly common case.
+  if (m_negotiated_fps < GBA_NATIVE_FPS)
+  {
+    const auto min_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(1.0 / m_negotiated_fps));
+    const bool sent_before = m_last_video_send_time.time_since_epoch().count() != 0;
+    if (sent_before && std::chrono::steady_clock::now() - m_last_video_send_time < min_interval)
+      return;
+  }
+
   std::vector<u8> rgb565(static_cast<size_t>(width) * height * 2);
   for (size_t i = 0; i < frame.size(); ++i)
   {
@@ -682,6 +705,21 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
     const u16 packed = static_cast<u16>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
     rgb565[i * 2 + 0] = static_cast<u8>(packed & 0xFF);
     rgb565[i * 2 + 1] = static_cast<u8>(packed >> 8);
+  }
+
+  // Downscaling negotiated in PerformAppHandshake: replaces the native buffer
+  // (and the width/height the rest of this function -- tile math, message
+  // header -- works off) with a smaller one *before* any of the existing
+  // diff/encode logic below runs, so that logic itself needs no knowledge of
+  // negotiation at all. NegotiateVideo() only ever returns native dimensions
+  // or ones divisible by 8, so the tile math's "8x8 evenly divides
+  // width/height" assumption keeps holding here exactly as it did before
+  // downscaling existed.
+  if (m_negotiated_width != width || m_negotiated_height != height)
+  {
+    rgb565 = DownscaleRgb565(rgb565, width, height, m_negotiated_width, m_negotiated_height);
+    width = m_negotiated_width;
+    height = m_negotiated_height;
   }
 
   if (rgb565 == *previous_rgb565)
@@ -782,7 +820,10 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
   message.insert(message.end(), compressed.begin(), compressed.end());
 
   if (SendWebSocketBinaryFrame(socket, message, m_stop))
+  {
     *previous_rgb565 = std::move(rgb565);
+    m_last_video_send_time = std::chrono::steady_clock::now();
+  }
 }
 
 void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& socket)
@@ -796,6 +837,32 @@ void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& socket)
     samples = std::move(m_pending_audio);
     m_pending_audio.clear();
     channels = m_audio_channels;
+  }
+
+  // Negotiated in PerformAppHandshake: a stream_type without audio (not
+  // GC_GBA_LINK, not reachable in this branch) or a client that declined it
+  // disables sending entirely -- the samples above are still drained (so
+  // ForwardAudioSamples' queue doesn't grow across an entire muted session)
+  // but simply dropped here instead of sent.
+  if (!m_audio_enabled)
+    return;
+
+  // Sample-rate downsampling isn't implemented (NegotiateAudio() never
+  // reports one, see GBAStreamHandshake.cpp); channel count is the one axis
+  // actually acted on here, and only for the one real case this core has --
+  // stereo down to mono, by averaging each L/R pair -- before the existing
+  // message-building loop below, which is otherwise unchanged.
+  if (channels == 2 && m_negotiated_audio_channels == 1)
+  {
+    std::vector<s16> mono(samples.size() / 2);
+    for (size_t i = 0; i < mono.size(); ++i)
+    {
+      const int left = samples[i * 2];
+      const int right = samples[i * 2 + 1];
+      mono[i] = static_cast<s16>((left + right) / 2);
+    }
+    samples = std::move(mono);
+    channels = 1;
   }
 
   std::vector<u8> message;

@@ -5,7 +5,9 @@
 
 #ifdef HAS_LIBMGBA
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <span>
@@ -16,6 +18,8 @@
 #include <SFML/Network/TcpSocket.hpp>
 
 #include "Common/CommonTypes.h"
+#include "Core/HW/GBAStreamHandshake.h"
+#include "Core/HW/GBAStreamNetUtil.h"
 #include "Core/Host.h"
 
 namespace HW::GBA
@@ -50,6 +54,26 @@ public:
   // no working stream.
   static std::vector<int> CheckPortsInUse();
 
+  // Whether the GC port `device_number` (0-3) currently has a client
+  // attached -- used by GBAStreamLobby to build the `slots` list in its own
+  // `hello` (see GBAStreamHandshake.h) without reaching into this class's
+  // streaming internals. false for a device_number with no GBAStreamHost
+  // instance at all (not configured as GBA (Client-Stream)), same as an
+  // unoccupied one -- callers that need to tell the two apart already know
+  // which device numbers are configured, the same way CheckPortsInUse()'s
+  // caller does.
+  static bool IsSlotOccupied(int device_number);
+  // "P1".."P4", matching the existing picker page's labels.
+  static std::string GetSlotLabel(int device_number);
+  // Current sample_rate/channels for `device_number`'s instance, or the
+  // m_audio_sample_rate/m_audio_channels default initializers below if no
+  // instance is registered for it. Used by GBAStreamLobby's own `hello`,
+  // which -- unlike GBAStreamHost's -- is sent before any particular slot is
+  // chosen, so it reports whichever configured slot answers first rather
+  // than one specific slot's value (in practice identical across all four,
+  // since they're all the same GBA core type).
+  static HandshakeAudioInfo GetNativeAudioInfo(int device_number);
+
   void GameChanged() override;
   void FrameEnded(std::span<const u32> video_buffer) override;
   void AudioRateChanged(u32 sample_rate) override;
@@ -59,6 +83,14 @@ private:
   void AcceptLoop();
   void ServeConnection(sf::TcpSocket& socket);
   bool PerformHandshake(sf::TcpSocket& socket, bool* is_websocket);
+  // Runs the app-level handshake (GBAStreamHandshake.h) on an already
+  // WebSocket-upgraded `socket`: sends `hello`, waits for `hello_ack`,
+  // rejects on version mismatch / wrong or already-occupied slot / malformed
+  // reply, otherwise negotiates and replies `session_ready`. On success,
+  // writes the negotiated parameters into m_negotiated_* (read by
+  // SendVideoFrameIfPending/SendAudioIfPending) before returning true; the
+  // caller (ServeConnection) only proceeds to RunWebSocketSession on true.
+  bool PerformAppHandshake(sf::TcpSocket& socket);
   void RunWebSocketSession(sf::TcpSocket& socket);
   void SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
                                std::vector<u8>* previous_rgb565);
@@ -66,6 +98,14 @@ private:
 
   void AttachInputOverride();
   void DetachInputOverride();
+
+  static std::mutex s_registry_mutex;
+  // Guarded by s_registry_mutex; index = device_number. Registered/
+  // unregistered around this object's lifetime (constructor/destructor) so
+  // IsSlotOccupied() can never observe a partially-destroyed instance --
+  // the destructor unregisters under the same mutex before tearing down
+  // anything else, and IsSlotOccupied() holds it for the whole lookup+read.
+  static std::array<GBAStreamHost*, 4> s_instances;
 
   const int m_device_number;
 
@@ -98,6 +138,21 @@ private:
   std::vector<s16> m_pending_audio;
   u32 m_audio_channels = 2;
   std::atomic<u32> m_audio_sample_rate{32768};
+
+  // Result of the current session's app-level handshake, written by
+  // PerformAppHandshake right before ServeConnection calls RunWebSocketSession
+  // (never during it), read by SendVideoFrameIfPending/SendAudioIfPending to
+  // decide whether to downscale before running the existing (untouched)
+  // encode pipeline. Default-initialized to native/enabled here purely as a
+  // safe fallback; every real session's values come from that handshake, not
+  // from these initializers, since RunWebSocketSession is unreachable without
+  // a successful one first.
+  u32 m_negotiated_width = GBA_NATIVE_WIDTH;
+  u32 m_negotiated_height = GBA_NATIVE_HEIGHT;
+  double m_negotiated_fps = GBA_NATIVE_FPS;
+  bool m_audio_enabled = true;
+  u8 m_negotiated_audio_channels = 2;
+  std::chrono::steady_clock::time_point m_last_video_send_time{};
 };
 
 }  // namespace HW::GBA

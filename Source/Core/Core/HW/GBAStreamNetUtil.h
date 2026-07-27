@@ -34,6 +34,33 @@ namespace HW::GBA
 constexpr unsigned short GBA_STREAM_LOBBY_PORT = 6800;
 constexpr unsigned short GBA_STREAM_PLAYER_BASE_PORT = 6801;
 
+// Wire protocol version implemented here, per the finlink repo's
+// docs/protocol.md (the single source of truth for this value and the
+// handshake/beacon messages built in GBAStreamHandshake.h). Exact-match only
+// -- no major/minor scheme. Bump this whenever a change here would require a
+// client-visible change to that document.
+constexpr int GBA_STREAM_PROTOCOL_VERSION = 2;
+
+// UDP broadcast port for the discovery beacon (GBAStreamBeacon.h) -- separate
+// from the TCP ports above so a stray beacon datagram can never be mistaken
+// for (or interfere with) a WebSocket connection attempt.
+constexpr unsigned short GBA_STREAM_BEACON_PORT = 6805;
+constexpr std::chrono::milliseconds GBA_STREAM_BEACON_INTERVAL{2000};
+
+// The integrated GBA core's native screen size and refresh rate, as
+// advertised in the app-level handshake's `hello` message (GBAStreamHandshake.h)
+// -- kept separate from GBAStreamHost.cpp's own GBA_STREAM_WIDTH/HEIGHT
+// (which drive the actual, unrelated video pipeline and are deliberately left
+// untouched) even though the values are numerically identical, so this header
+// and the handshake code built on it have no dependency on that file's
+// internals. 280896 = 228 scanlines * 1232 cycles/line, the GBA's fixed
+// per-frame cycle count; dividing GBA_ARM7TDMI_FREQUENCY (16777216 Hz, see
+// Externals/mGBA/mgba/include/mgba/internal/gba/gba.h) by that gives the
+// exact native frame rate, ~59.7275 Hz.
+constexpr u32 GBA_NATIVE_WIDTH = 240;
+constexpr u32 GBA_NATIVE_HEIGHT = 160;
+constexpr double GBA_NATIVE_FPS = 16777216.0 / 280896.0;
+
 // Sends `size` bytes on a non-blocking socket, retrying on NotReady. Bounds
 // every wait to a short sleep so a stalled/frozen peer (e.g. a crashed
 // browser tab that stops draining its receive buffer) can never block this
