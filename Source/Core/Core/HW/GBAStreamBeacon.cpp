@@ -21,7 +21,7 @@ namespace HW::GBA
 {
 namespace
 {
-std::string BuildBeaconMessage()
+std::string BuildBeaconMessage(const std::string& local_host)
 {
   picojson::object obj;
   obj.emplace("type", std::string("finlink_beacon"));
@@ -33,8 +33,7 @@ std::string BuildBeaconMessage()
   // that's what a human picking a server from a list wants to recognize.
   obj.emplace("game_title", SConfig::GetInstance().GetTitleDescription());
   obj.emplace("stream_type", std::string(kStreamTypeGcGbaLink));
-  const auto local_address = sf::IpAddress::getLocalAddress();
-  obj.emplace("host", local_address ? local_address->toString() : std::string());
+  obj.emplace("host", local_host);
   obj.emplace("handshake_port", static_cast<double>(GBA_STREAM_LOBBY_PORT));
   return picojson::value(obj).serialize();
 }
@@ -49,6 +48,18 @@ GBAStreamBeacon::~GBAStreamBeacon()
 void GBAStreamBeacon::Start()
 {
   m_stop = false;
+  // Probed once here rather than inside Run()'s loop: getLocalAddress()
+  // resolves whichever local interface the OS currently prefers for an
+  // outbound route, which is free to change between calls on a machine with
+  // more than one active interface (Wi-Fi + Ethernet, a VPN adapter, ...).
+  // Re-probing every beacon tick used to mean the "host" field could differ
+  // from one beacon to the next; discovery clients upsert their server list
+  // by exact host-string match (see clients/3ds/source/discovery.cpp), so a
+  // changing host looked like a constant stream of new servers replacing
+  // ones that immediately went stale -- a discovered server appearing to be
+  // discarded over and over, as if the search never actually converged.
+  const auto local_address = sf::IpAddress::getLocalAddress();
+  m_local_host = local_address ? local_address->toString() : std::string();
   m_thread = std::thread([this] { Run(); });
 }
 
@@ -67,7 +78,7 @@ void GBAStreamBeacon::Run()
   sf::UdpSocket socket;
   while (!m_stop)
   {
-    const std::string message = BuildBeaconMessage();
+    const std::string message = BuildBeaconMessage(m_local_host);
     // Best-effort: a dropped/failed broadcast just means this tick's beacon
     // didn't go out, no different from ordinary UDP loss -- the next tick
     // two seconds later covers for it, so the [[nodiscard]] status is

@@ -6,6 +6,7 @@
 #ifdef HAS_LIBMGBA
 
 #include <atomic>
+#include <string>
 #include <thread>
 
 namespace HW::GBA
@@ -30,6 +31,10 @@ private:
 
   std::atomic_bool m_stop{false};
   std::thread m_thread;
+  // Probed once per Start(), not once per beacon tick -- see Run()'s comment
+  // on BuildBeaconMessage() for why a per-tick reprobe is actively harmful
+  // to discovery clients, not just wasted work.
+  std::string m_local_host;
 };
 
 }  // namespace HW::GBA
