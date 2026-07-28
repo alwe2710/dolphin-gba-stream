@@ -46,6 +46,8 @@ CMakeLists.txt.user
 
 # clangd cache for Neovim
 .cache/clangd
+# Ignore CMake user presets
+CMakeUserPresets.json
 
 # emsdk (Externals/emsdk submodule): the emsdk repo itself is vendored and
 # tracked, but `emsdk install`'s actual downloaded/unpacked toolchain
