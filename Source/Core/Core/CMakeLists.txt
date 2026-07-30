@@ -747,7 +747,6 @@ if(USE_MGBA)
     HW/GBACore.h
     HW/GBAStreamBeacon.cpp
     HW/GBAStreamBeacon.h
-    HW/GBAStreamClientPage.h
     HW/GBAStreamHandshake.cpp
     HW/GBAStreamHandshake.h
     HW/GBAStreamHost.cpp

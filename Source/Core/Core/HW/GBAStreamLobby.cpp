@@ -25,7 +25,6 @@
 
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/GBAStreamBeacon.h"
-#include "Core/HW/GBAStreamClientPage.h"
 #include "Core/HW/GBAStreamHandshake.h"
 #include "Core/HW/GBAStreamHost.h"
 #include "Core/HW/GBAStreamNetUtil.h"
@@ -234,13 +233,11 @@ private:
       if (m_listener.accept(*socket) != sf::Socket::Status::Done)
         continue;
 
-      // Dispatched to its own thread rather than served inline here: a plain
-      // GET / response now embeds the whole WASM web client
-      // (GBAStreamWebClientJs.h) inline, which can take a real amount of
-      // time to send over a slow link, and serving it inline on the same
-      // thread that also accept()s would block every other prospective
-      // client -- including the app handshake HandleConnection() also runs
-      // for a WS-upgraded connection -- for that whole duration. Same fix
+      // Dispatched to its own thread rather than served inline here: for a
+      // WS-upgraded connection, HandleConnection() runs the app handshake,
+      // which waits up to APP_HANDSHAKE_TIMEOUT for hello_ack -- handling
+      // that inline on the same thread that also accept()s would block
+      // every other prospective client for that whole duration. Same fix
       // and reasoning as GBAStreamHost::ServeConnection (see its header
       // comment); threads aren't reaped as they finish, only joined in bulk
       // once this loop exits, for the same reasoning given there.
@@ -268,27 +265,27 @@ private:
     if (!IsWebSocketUpgradeRequest(*request))
     {
       // A plain (non-WS-upgrade) GET here is a human opening this URL in a
-      // browser -- the web client page, sharing finlink_core's handshake/
-      // video/audio/input logic via WASM (GBAStreamWebClient/wasm_bridge.c)
-      // rather than a parallel JS implementation of protocol_version 2. Its
-      // own JS then performs the *app-level* handshake itself once a slot is
-      // picked, as its own WebSocket connection to a player port -- entirely
-      // separate from this HTTP response, which is unrelated to that
-      // handshake and unaffected by protocol_version.
-      const std::string body = BuildClientHtml();
+      // browser out of habit -- there's no page to serve any more (the web
+      // client used to be embedded and served from here; it's now
+      // finlink/clients/web, a standalone client decoupled from Dolphin the
+      // same way Android/3DS/Switch/NDS always were, connecting to
+      // whichever finlink server -- Dolphin included -- the user points it
+      // at). Just says so, rather than a bare/confusing connection reset.
+      static constexpr std::string_view body =
+          "This is a finlink server (GBAStreamLobby), not a web page.\n"
+          "Connect with a finlink client instead -- e.g. finlink/clients/web "
+          "(github.com/alwe2710/finlink), pointed at this host and port.\n";
       std::ostringstream response;
       // std::to_string(), not body.size() streamed directly: an
       // ostringstream formats integers per the process's current locale
       // (Qt sets this from the system locale at startup), which can insert
       // thousands-grouping punctuation into what must be a plain decimal
-      // Content-Length -- e.g. a German locale turning byte count 45934
-      // into the literal header value "45.934", which every HTTP client
-      // correctly rejects as malformed. This body (the WASM-embedding web
-      // client page) is comfortably past the ~1000-byte threshold where
-      // grouping kicks in, unlike GBAStreamHost.cpp's /status body -- see
-      // its identical fix. std::to_string() is always locale-independent.
+      // Content-Length -- see GBAStreamHost.cpp's /status body for the
+      // identical fix (this body is short enough to normally stay under the
+      // ~1000-byte threshold where grouping kicks in, but there's no reason
+      // to rely on that). std::to_string() is always locale-independent.
       response << "HTTP/1.1 200 OK\r\n"
-               << "Content-Type: text/html; charset=utf-8\r\n"
+               << "Content-Type: text/plain; charset=utf-8\r\n"
                << "Content-Length: " << std::to_string(body.size()) << "\r\n"
                << "Connection: close\r\n\r\n"
                << body;
