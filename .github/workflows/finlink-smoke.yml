@@ -1,0 +1,93 @@
+name: finlink smoke
+
+# This repo had zero GitHub Actions workflows before this file (confirmed:
+# no .github/workflows/*.yml at all) -- unlike Cemu/azahar/melonDS, there
+# was no existing build.yml to extend or add a sibling next to, so both
+# jobs here are new from scratch. Part of the finlink CI pipeline's
+# build-smoke stage; see finlink/docs/capabilities.md and the 5-repo drift
+# snapshot in the plan this came from.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  finlink-freshness:
+    name: Externals/finlink freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false # only need the gitlink SHA + .gitmodules, not an actual checkout
+
+      - name: Compare pinned commit + tracked branch against canonical finlink
+        run: |
+          set -euo pipefail
+          # .gitmodules declares `branch = feature/protocol-v2`, which no
+          # longer exists on the finlink remote at all (confirmed: `git
+          # ls-remote` returns nothing for it) -- most likely a normal,
+          # already-merged-and-deleted feature branch whose name was never
+          # updated afterward, since the pinned commit itself is still a
+          # perfectly ordinary ancestor of finlink's main. Defaulting the
+          # comparison target to `main`, same as azahar/melonDS (neither of
+          # which has a dedicated long-lived work branch like Cemu's
+          # `transcoding`) -- adjust if this fork is meant to track
+          # something else.
+          EXPECTED_BRANCH="main"
+
+          DECLARED_BRANCH="$(git config -f .gitmodules --get submodule.Externals/finlink.branch || echo '(none)')"
+          PINNED_SHA="$(git ls-tree HEAD Externals/finlink | awk '{print $3}')"
+
+          if ! git ls-remote --exit-code https://github.com/alwe2710/finlink.git "refs/heads/$DECLARED_BRANCH" > /dev/null 2>&1; then
+            echo "::warning::.gitmodules declares tracking branch '$DECLARED_BRANCH' for Externals/finlink, but that branch no longer exists on the finlink remote at all. Update the 'branch =' line in .gitmodules (probably to '$EXPECTED_BRANCH')."
+          fi
+
+          LATEST_SHA="$(git ls-remote https://github.com/alwe2710/finlink.git "refs/heads/$EXPECTED_BRANCH" | awk '{print $1}')"
+          echo "Pinned Externals/finlink commit: $PINNED_SHA"
+          echo "Latest commit on finlink's $EXPECTED_BRANCH: $LATEST_SHA"
+
+          if [ "$PINNED_SHA" != "$LATEST_SHA" ]; then
+            echo "::warning::Externals/finlink is pinned at $PINNED_SHA, which is behind finlink's $EXPECTED_BRANCH tip ($LATEST_SHA). Update with: git submodule update --remote Externals/finlink && git add Externals/finlink && git commit"
+            exit 1
+          fi
+
+  linux-build-smoke:
+    name: Linux build (build-smoke only, not the full release matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Package list + preset names verified against the current upstream
+      # dolphin-emu/dolphin wiki ("Building for Linux") and this fork's own
+      # CMakePresets.json -- not yet empirically re-run in GitHub's
+      # containers, so a first run may need a small correction (same
+      # caveat as the devkitPro-based jobs in finlink/.github/workflows/build.yml).
+      # Deliberately scoped to a single Linux/x64 build, not upstream
+      # Dolphin's full Windows/macOS/Linux release matrix -- this stage is
+      # build-smoke only (does it still compile with finlink wired in?),
+      # not release engineering.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
+            libegl1-mesa-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev libudev-dev libevdev-dev libsdl3-dev \
+            libfmt-dev glslang-dev glslang-tools libpugixml-dev libenet-dev \
+            libxxhash-dev libbz2-dev liblzma-dev libzstd-dev zlib1g-dev \
+            libminizip-ng-dev liblzo2-dev liblz4-dev libspng-dev libcubeb-dev \
+            libusb-1.0-0-dev libsfml-dev libminiupnpc-dev libcurl4-openssl-dev \
+            libhidapi-dev libsystemd-dev libgtest-dev libasound2-dev libpulse-dev \
+            llvm-dev libbluetooth-dev qt6-base-dev qt6-base-private-dev qt6-svg-dev gettext \
+            ninja-build
+
+      - name: Configure
+        run: cmake --preset ninja-release-x64
+
+      - name: Build
+        run: cmake --build --preset ninja-build-release-x64
