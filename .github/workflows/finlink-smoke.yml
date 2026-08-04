@@ -15,6 +15,21 @@ on:
   workflow_dispatch:
 
 jobs:
+  dual-audio-isolation:
+    # Static/structural, not a build -- see Tools/check_dual_audio_isolation.py's
+    # own docstring for why this is the right way to prove the
+    # "dual-audio-server" test category property (only a GBA slot's own
+    # audio ever reaches finlink, the GameCube's own TV/DSP audio plays
+    # locally untouched) without needing a fully emulated, ROM-booted
+    # session in CI.
+    name: dual-audio-server isolation (GBACore.cpp static check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - run: python3 Tools/check_dual_audio_isolation.py
+
   finlink-freshness:
     name: Externals/finlink freshness
     runs-on: ubuntu-latest
