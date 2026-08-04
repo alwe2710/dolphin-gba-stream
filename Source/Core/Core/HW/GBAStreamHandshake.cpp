@@ -130,12 +130,17 @@ std::optional<HandshakeAck> ParseHelloAck(const std::vector<u8>& payload)
       ack.audio_limits = AudioLimits{*max_sample_rate, static_cast<u8>(*max_channels)};
   }
 
+  const auto video_mode = ReadStringFromJson(*obj, "video_mode");
+  if (video_mode)
+    ack.video_mode = *video_mode;
+
   return ack;
 }
 
 std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
                                       const std::optional<NegotiatedAudio>& audio,
-                                      const std::optional<HandshakeRedirect>& redirect)
+                                      const std::optional<HandshakeRedirect>& redirect,
+                                      const std::string& video_mode)
 {
   picojson::object obj;
   obj.emplace("message", picojson::value("session_ready"));
@@ -152,6 +157,7 @@ std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
     redirect_obj.emplace("port", static_cast<double>(redirect->port));
     obj.emplace("redirect", redirect_obj);
   }
+  obj.emplace("video_mode", picojson::value(video_mode));
   return picojson::value(obj).serialize();
 }
 

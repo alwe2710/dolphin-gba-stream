@@ -71,13 +71,20 @@ struct AudioLimits
   u8 max_channels;
 };
 
-// What the client sends back in `hello_ack`.
+// What the client sends back in `hello_ack`. video_mode (finlink's
+// protocol.md "tiles"/"legacy"/"h264"/"h265", empty if unset/unrecognized)
+// is parsed only so the server can honestly report its fallback in
+// session_ready.video_mode -- this stream type's tile-vs-raw choice
+// (GBAStreamHost.cpp's SendVideoFrameIfPending, `use_tiles`) is a per-frame
+// adaptive heuristic, not driven by this request at all, and there's no
+// H.264/H.265 encoder here either way.
 struct HandshakeAck
 {
   int protocol_version;
   int requested_slot;
   VideoLimits video_limits;
   std::optional<AudioLimits> audio_limits;
+  std::string video_mode;
 };
 
 struct NegotiatedVideo
@@ -115,9 +122,16 @@ std::string BuildHelloMessage(const HandshakeOffer& offer);
 // HandshakeErrorCode::MalformedRequest.
 std::optional<HandshakeAck> ParseHelloAck(const std::vector<u8>& payload);
 
+// video_mode: always the fixed declared capability "tiles" at both call
+// sites (GBAStreamHost.cpp's real player-port session, and
+// GBAStreamLobby.cpp's redirect-hop placeholder reply) -- this stream type
+// can and does use TILES adaptively (never H.264/H.265), see
+// GBAStreamHandshake.h's own HandshakeAck::video_mode comment for why this
+// isn't driven by the per-frame use_tiles heuristic.
 std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
                                       const std::optional<NegotiatedAudio>& audio,
-                                      const std::optional<HandshakeRedirect>& redirect);
+                                      const std::optional<HandshakeRedirect>& redirect,
+                                      const std::string& video_mode);
 
 std::string BuildHandshakeErrorMessage(HandshakeErrorCode code, const std::string& detail);
 

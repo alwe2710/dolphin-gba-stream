@@ -568,7 +568,8 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
 
   if (!SendWebSocketTextFrame(
           socket, BuildSessionReadyMessage(m_device_number, negotiated_video, negotiated_audio,
-                                           std::nullopt /* redirect: this is the terminal port */),
+                                           std::nullopt /* redirect: this is the terminal port */,
+                                           "tiles" /* see GBAStreamHandshake.h's own comment */),
           m_stop))
   {
     return false;

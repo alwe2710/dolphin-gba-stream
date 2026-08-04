@@ -162,16 +162,18 @@ void PerformHandshakeAndRedirect(sf::TcpSocket& socket, const HttpRequest& reque
   }
 
   // Nothing here is the final negotiation (GBAStreamHost does that once the
-  // client reconnects to the target port) -- `video`/`audio` are filled with
-  // native values only because BuildSessionReadyMessage's shape requires
-  // something; the `redirect` field is the only part of this reply the
-  // client actually needs to act on.
+  // client reconnects to the target port) -- `video`/`audio`/`video_mode`
+  // are filled with placeholder values only because BuildSessionReadyMessage's
+  // shape requires something; the `redirect` field is the only part of this
+  // reply the client actually needs to act on. The real, authoritative
+  // video_mode arrives in the second session_ready, after the redirect.
   const NegotiatedVideo native_video{GBA_NATIVE_WIDTH, GBA_NATIVE_HEIGHT, GBA_NATIVE_FPS};
   const HandshakeRedirect redirect{
       RequestHost(request),
       static_cast<u16>(GBA_STREAM_PLAYER_BASE_PORT + ack->requested_slot)};
   SendWebSocketTextFrame(
-      socket, BuildSessionReadyMessage(ack->requested_slot, native_video, std::nullopt, redirect),
+      socket, BuildSessionReadyMessage(ack->requested_slot, native_video, std::nullopt, redirect,
+                                        "tiles" /* placeholder, see comment above */),
       stop_flag);
 }
 
