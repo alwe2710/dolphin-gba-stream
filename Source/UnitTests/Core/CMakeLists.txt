@@ -4,6 +4,24 @@ add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 add_dolphin_test(GBAStreamHandshakeTest GBAStreamHandshakeTest.cpp)
 
+# Real WS+app-handshake client (see the test file's own top comment) goes
+# through finlink_core directly rather than duplicating GBAStreamHandshake.cpp's
+# own picojson-based logic -- unlike GBAStreamHandshakeTest above (which
+# only needs picojson, already linked into `core`), this needs finlink_core's
+# websocket.c/handshake.c/json.c compiled in too.
+set(FINLINK_CORE_DIR ${CMAKE_SOURCE_DIR}/Externals/finlink/core)
+add_dolphin_test(GBAStreamMultiHostTest
+  GBAStreamMultiHostTest.cpp
+  ${FINLINK_CORE_DIR}/src/websocket.c
+  ${FINLINK_CORE_DIR}/src/handshake.c
+  ${FINLINK_CORE_DIR}/src/json.c
+  ${FINLINK_CORE_DIR}/third_party/teeny-sha1/teeny-sha1.c
+)
+target_include_directories(GBAStreamMultiHostTest PRIVATE
+  ${FINLINK_CORE_DIR}/include
+  ${FINLINK_CORE_DIR}/third_party/teeny-sha1
+)
+
 add_dolphin_test(DSPAcceleratorTest DSP/DSPAcceleratorTest.cpp)
 add_dolphin_test(DSPAssemblyTest
   DSP/DSPAssemblyTest.cpp
