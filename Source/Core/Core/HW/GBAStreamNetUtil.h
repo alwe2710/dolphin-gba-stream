@@ -79,8 +79,21 @@ inline bool SendAllBytes(sf::TcpSocket& socket, const void* data, size_t size,
   // connection is dead". Giving up after a few seconds turns that into an
   // ordinary failed send -- callers already treat a false return as "this
   // connection is over" -- instead of blocking this GBA slot's whole
-  // video/audio/input pump for as long as the peer stays wedged.
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  // video/audio/input pump for as long as the peer stays wedged. 3 seconds
+  // turned out too tight in practice (a routine Wi-Fi hiccup can leave a
+  // send still buffered past that point even though the peer is still very
+  // much alive); 10 seconds absorbs that without meaningfully changing
+  // behavior for an actually-dead peer, which was never going to un-stall
+  // in the next 7 seconds either. finlink_core now has this as a named
+  // constant, FINLINK_WS_SEND_TIMEOUT_MS (core/include/finlink/websocket.h)
+  // -- not referenced here, and not just because of a stale submodule pin
+  // like the other three host forks: this repo's entire WebSocket framing
+  // (GBAStreamWebSocket.h, this file, GBAStreamHandshake.cpp) predates
+  // finlink_core's extraction as a shared library and never got migrated
+  // onto it -- Externals/finlink is checked out but not actually used
+  // anywhere in Source/. Worth revisiting as its own migration, not as a
+  // side effect of this one-line timeout fix.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   while (sent_total < size)
   {
     if (stop_flag || std::chrono::steady_clock::now() > deadline)
