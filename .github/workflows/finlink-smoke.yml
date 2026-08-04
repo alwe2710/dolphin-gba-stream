@@ -62,25 +62,27 @@ jobs:
         with:
           submodules: recursive
 
-      # Package list + preset names verified against the current upstream
-      # dolphin-emu/dolphin wiki ("Building for Linux") and this fork's own
-      # CMakePresets.json -- not yet empirically re-run in GitHub's
-      # containers, so a first run may need a small correction (same
-      # caveat as the devkitPro-based jobs in finlink/.github/workflows/build.yml).
-      # Deliberately scoped to a single Linux/x64 build, not upstream
-      # Dolphin's full Windows/macOS/Linux release matrix -- this stage is
-      # build-smoke only (does it still compile with finlink wired in?),
-      # not release engineering.
+      # Package list + preset names originally taken from the current
+      # upstream dolphin-emu/dolphin wiki ("Building for Linux") and this
+      # fork's own CMakePresets.json -- corrected after the first real run
+      # here (2026-08-04): libsdl3-dev and libminizip-ng-dev don't exist in
+      # Ubuntu 24.04's repos yet (both are quite new packages upstream),
+      # dropped so CMake falls back to this fork's own vendored submodules
+      # (Externals/SDL, Externals/minizip-ng, already checked out via
+      # `submodules: recursive` above) instead. Deliberately scoped to a
+      # single Linux/x64 build, not upstream Dolphin's full Windows/macOS/
+      # Linux release matrix -- this stage is build-smoke only (does it
+      # still compile with finlink wired in?), not release engineering.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             pkg-config libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
             libegl1-mesa-dev libavcodec-dev libavformat-dev libavutil-dev \
-            libswresample-dev libswscale-dev libudev-dev libevdev-dev libsdl3-dev \
+            libswresample-dev libswscale-dev libudev-dev libevdev-dev \
             libfmt-dev glslang-dev glslang-tools libpugixml-dev libenet-dev \
             libxxhash-dev libbz2-dev liblzma-dev libzstd-dev zlib1g-dev \
-            libminizip-ng-dev liblzo2-dev liblz4-dev libspng-dev libcubeb-dev \
+            liblzo2-dev liblz4-dev libspng-dev libcubeb-dev \
             libusb-1.0-0-dev libsfml-dev libminiupnpc-dev libcurl4-openssl-dev \
             libhidapi-dev libsystemd-dev libgtest-dev libasound2-dev libpulse-dev \
             llvm-dev libbluetooth-dev qt6-base-dev qt6-base-private-dev qt6-svg-dev gettext \
