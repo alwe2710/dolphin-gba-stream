@@ -93,3 +93,19 @@ jobs:
 
       - name: Build
         run: cmake --build --preset ninja-build-release-x64
+
+      # GBAStreamHandshakeTest.cpp (Source/UnitTests/Core/) -- the gtest
+      # `tests` binary is EXCLUDE_FROM_ALL (Source/UnitTests/CMakeLists.txt),
+      # so the plain Build step above never builds it; done here as its own
+      # step, reusing this job's already-configured build dir rather than
+      # paying for the dependency install + configure a second time in a
+      # separate job.
+      - name: Build unit tests
+        run: cmake --build --preset ninja-build-release-x64 --target GBAStreamHandshakeTest tests
+
+      # binaryDir for this preset is build/release/x64 (CMakePresets.json);
+      # UnitTests/CMakeLists.txt appends "/Binaries/Tests" to
+      # CMAKE_RUNTIME_OUTPUT_DIRECTORY for the tests binary specifically.
+      - name: Run GBAStreamHandshake tests
+        working-directory: build/release/x64
+        run: ./Binaries/Tests/tests --gtest_filter="GBAStreamHandshake.*"
