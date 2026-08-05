@@ -76,6 +76,33 @@ void GBAStreamBeacon::Run()
   // local port (the OS assigns an ephemeral one on first send), and SFML
   // enables SO_BROADCAST by default for every UDP socket it creates.
   sf::UdpSocket socket;
+  // Bind to the specific interface m_local_host resolved to (see Start()'s
+  // own comment on getLocalAddress()) before sending. On a machine with
+  // more than one active network interface (VPN, Docker/virtual adapters,
+  // Ethernet + Wi-Fi both up -- not unusual for a dev/gaming PC), leaving
+  // the socket unbound lets the OS pick whichever interface its default
+  // route for the broadcast address happens to be, not necessarily the one
+  // a discovering client (e.g. a 3DS on Wi-Fi) is actually reachable on --
+  // the broadcast can leave via a completely different interface than the
+  // LAN the client is listening on, silently going nowhere a client will
+  // ever see. Binding pins the send to the interface m_local_host itself
+  // already names, which is also the address embedded in the beacon
+  // message clients use to connect back -- if that address weren't
+  // reachable, nothing would work regardless, so this can't make things
+  // worse than before. Best-effort, same as the send() below: a status
+  // other than Done just means this fell through to sending unbound.
+  //
+  // IpAddress::resolve() (not the newer sf::Dns::resolve()) deliberately --
+  // this project vendors an SFML snapshot (Externals/SFML) old enough not
+  // to have sf::Dns at all; a system SFML installed on a given build
+  // machine may be newer and flag this call deprecated, but switching to
+  // sf::Dns::resolve() would fail to compile against the actually-vendored
+  // copy CI builds against.
+  if (!m_local_host.empty())
+  {
+    if (const auto local_addr = sf::IpAddress::resolve(m_local_host))
+      (void)socket.bind(sf::Socket::AnyPort, *local_addr);
+  }
   while (!m_stop)
   {
     const std::string message = BuildBeaconMessage(m_local_host);
