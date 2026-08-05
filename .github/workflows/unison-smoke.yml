@@ -1,10 +1,10 @@
-name: finlink smoke
+name: Unison smoke
 
 # This repo had zero GitHub Actions workflows before this file (confirmed:
 # no .github/workflows/*.yml at all) -- unlike Cemu/azahar/melonDS, there
 # was no existing build.yml to extend or add a sibling next to, so both
-# jobs here are new from scratch. Part of the finlink CI pipeline's
-# build-smoke stage; see finlink/docs/capabilities.md and the 5-repo drift
+# jobs here are new from scratch. Part of the Unison CI pipeline's
+# build-smoke stage; see unison/docs/capabilities.md and the 5-repo drift
 # snapshot in the plan this came from.
 
 on:
@@ -19,7 +19,7 @@ jobs:
     # Static/structural, not a build -- see Tools/check_dual_audio_isolation.py's
     # own docstring for why this is the right way to prove the
     # "dual-audio-server" test category property (only a GBA slot's own
-    # audio ever reaches finlink, the GameCube's own TV/DSP audio plays
+    # audio ever reaches Unison, the GameCube's own TV/DSP audio plays
     # locally untouched) without needing a fully emulated, ROM-booted
     # session in CI.
     name: dual-audio-server isolation (GBACore.cpp static check)
@@ -30,42 +30,42 @@ jobs:
           submodules: false
       - run: python3 Tools/check_dual_audio_isolation.py
 
-  finlink-freshness:
-    name: Externals/finlink freshness
+  unison-freshness:
+    name: Externals/unison freshness
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false # only need the gitlink SHA + .gitmodules, not an actual checkout
 
-      - name: Compare pinned commit + tracked branch against canonical finlink
+      - name: Compare pinned commit + tracked branch against canonical Unison
         run: |
           set -euo pipefail
           # .gitmodules declares `branch = feature/protocol-v2`, which no
-          # longer exists on the finlink remote at all (confirmed: `git
+          # longer exists on the Unison remote at all (confirmed: `git
           # ls-remote` returns nothing for it) -- most likely a normal,
           # already-merged-and-deleted feature branch whose name was never
           # updated afterward, since the pinned commit itself is still a
-          # perfectly ordinary ancestor of finlink's main. Defaulting the
+          # perfectly ordinary ancestor of Unison's main. Defaulting the
           # comparison target to `main`, same as azahar/melonDS (neither of
           # which has a dedicated long-lived work branch like Cemu's
           # `transcoding`) -- adjust if this fork is meant to track
           # something else.
           EXPECTED_BRANCH="main"
 
-          DECLARED_BRANCH="$(git config -f .gitmodules --get submodule.Externals/finlink.branch || echo '(none)')"
-          PINNED_SHA="$(git ls-tree HEAD Externals/finlink | awk '{print $3}')"
+          DECLARED_BRANCH="$(git config -f .gitmodules --get submodule.Externals/unison.branch || echo '(none)')"
+          PINNED_SHA="$(git ls-tree HEAD Externals/unison | awk '{print $3}')"
 
-          if ! git ls-remote --exit-code https://github.com/alwe2710/finlink.git "refs/heads/$DECLARED_BRANCH" > /dev/null 2>&1; then
-            echo "::warning::.gitmodules declares tracking branch '$DECLARED_BRANCH' for Externals/finlink, but that branch no longer exists on the finlink remote at all. Update the 'branch =' line in .gitmodules (probably to '$EXPECTED_BRANCH')."
+          if ! git ls-remote --exit-code https://github.com/alwe2710/Unison.git "refs/heads/$DECLARED_BRANCH" > /dev/null 2>&1; then
+            echo "::warning::.gitmodules declares tracking branch '$DECLARED_BRANCH' for Externals/unison, but that branch no longer exists on the Unison remote at all. Update the 'branch =' line in .gitmodules (probably to '$EXPECTED_BRANCH')."
           fi
 
-          LATEST_SHA="$(git ls-remote https://github.com/alwe2710/finlink.git "refs/heads/$EXPECTED_BRANCH" | awk '{print $1}')"
-          echo "Pinned Externals/finlink commit: $PINNED_SHA"
-          echo "Latest commit on finlink's $EXPECTED_BRANCH: $LATEST_SHA"
+          LATEST_SHA="$(git ls-remote https://github.com/alwe2710/Unison.git "refs/heads/$EXPECTED_BRANCH" | awk '{print $1}')"
+          echo "Pinned Externals/unison commit: $PINNED_SHA"
+          echo "Latest commit on Unison's $EXPECTED_BRANCH: $LATEST_SHA"
 
           if [ "$PINNED_SHA" != "$LATEST_SHA" ]; then
-            echo "::warning::Externals/finlink is pinned at $PINNED_SHA, which is behind finlink's $EXPECTED_BRANCH tip ($LATEST_SHA). Update with: git submodule update --remote Externals/finlink && git add Externals/finlink && git commit"
+            echo "::warning::Externals/unison is pinned at $PINNED_SHA, which is behind Unison's $EXPECTED_BRANCH tip ($LATEST_SHA). Update with: git submodule update --remote Externals/unison && git add Externals/unison && git commit"
             exit 1
           fi
 
@@ -87,7 +87,7 @@ jobs:
       # `submodules: recursive` above) instead. Deliberately scoped to a
       # single Linux/x64 build, not upstream Dolphin's full Windows/macOS/
       # Linux release matrix -- this stage is build-smoke only (does it
-      # still compile with finlink wired in?), not release engineering.
+      # still compile with Unison wired in?), not release engineering.
       - name: Install build dependencies
         run: |
           sudo apt-get update

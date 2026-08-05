@@ -15,11 +15,11 @@ namespace HW::GBA
 {
 // App-level handshake (hello / hello_ack / session_ready / handshake_error),
 // exchanged as WebSocket text frames before any Video/Audio/Input binary
-// frame, per finlink's docs/protocol.md ("Verbindungsaufbau: Handshake").
+// frame, per Unison's docs/protocol.md ("Verbindungsaufbau: Handshake").
 // Shared between GBAStreamLobby (port 6800, always the first hop, sends the
 // redirect for multi-slot stream types) and GBAStreamHost (player ports,
 // 6801-6804, the terminal hop for GC_GBA_LINK). Pure message (de)serialization
-// and negotiation math -- no socket I/O, mirroring how finlink's own core/
+// and negotiation math -- no socket I/O, mirroring how Unison's own core/
 // separates protocol logic from transport.
 
 constexpr char kStreamTypeGcGbaLink[] = "GC_GBA_LINK";
@@ -71,7 +71,7 @@ struct AudioLimits
   u8 max_channels;
 };
 
-// What the client sends back in `hello_ack`. video_mode (finlink's
+// What the client sends back in `hello_ack`. video_mode (Unison's
 // protocol.md "tiles"/"legacy"/"h264"/"h265", empty if unset/unrecognized)
 // is parsed only so the server can honestly report its fallback in
 // session_ready.video_mode -- this stream type's tile-vs-raw choice

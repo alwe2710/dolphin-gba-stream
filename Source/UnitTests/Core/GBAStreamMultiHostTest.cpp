@@ -1,14 +1,14 @@
 // Copyright 2026 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Real integration tests for the "multi-host" test category (finlink's
+// Real integration tests for the "multi-host" test category (Unison's
 // test-categorization project notes): does connecting multiple simultaneous
 // clients to different GBAStreamHost slots actually work, and does the
 // slot-occupancy state GBAStreamLobby relies on (IsSlotOccupied/
 // GetSlotLabel) correctly reflect real, live connections?
 //
 // Unlike the modern-host mic/touch passthrough tests (deferred to a
-// separate ROM-boot initiative, see finlink's own memory notes),
+// separate ROM-boot initiative, see Unison's own memory notes),
 // GBAStreamHost's constructor takes only a device_number -- no GBA core
 // reference at all (confirmed by reading GBAStreamHost.cpp: no m_core/
 // mCore member anywhere) -- so real GBAStreamHost instances, real TCP
@@ -18,11 +18,11 @@
 // UnitTests/CMakeLists.txt), so no new linking was needed for that part.
 //
 // The test client's own WS/handshake handling deliberately goes through
-// finlink_core (Externals/finlink/core) rather than hand-rolling another
+// unison_core (Externals/unison/core) rather than hand-rolling another
 // copy of the WebSocket/JSON logic GBAStreamHandshake.cpp already has --
 // this doubles as a real cross-check that GBAStreamHost's hand-rolled
 // picojson-based protocol implementation actually produces/accepts what
-// the documented finlink wire protocol (docs/protocol.md) says, the same
+// the documented Unison wire protocol (docs/protocol.md) says, the same
 // spirit as the "generell: Protokoll-Implementierung einheitlich" test
 // category, as a side effect of just needing *a* client.
 //
@@ -61,8 +61,8 @@
 
 extern "C"
 {
-#include <finlink/handshake.h>
-#include <finlink/websocket.h>
+#include <unison/handshake.h>
+#include <unison/websocket.h>
 }
 
 namespace HW::GBA
@@ -88,7 +88,7 @@ namespace
 // (again confirmed the hard way -- a second crash, this time a std::terminate
 // from InputConfig::GetController(), without this). Unlike the modern-host
 // mic/touch passthrough tests (deferred to a separate ROM-boot initiative,
-// see finlink's own memory notes), this is real, lightweight, self-contained
+// see Unison's own memory notes), this is real, lightweight, self-contained
 // controller-config bring-up -- no GBA core, no ROM, no GPU renderer needed,
 // same reasoning that made this whole test feasible in the first place.
 class ScopedDolphinConfig
@@ -115,8 +115,8 @@ private:
   std::string m_profile_path;
 };
 
-// Real, minimal WebSocket + finlink app-handshake client -- plays the same
-// role a browser tab would, using finlink_core directly (see this file's
+// Real, minimal WebSocket + Unison app-handshake client -- plays the same
+// role a browser tab would, using unison_core directly (see this file's
 // own top comment). Blocking sockets with a generous fixed deadline: these
 // tests only ever talk to a real, already-listening GBAStreamHost on
 // localhost, never a flaky network.
@@ -135,17 +135,17 @@ public:
     uint8_t random_bytes[16];
     for (int i = 0; i < 16; i++)
       random_bytes[i] = static_cast<uint8_t>(i * 17 + port);  // port folded in so parallel clients differ
-    char key[FINLINK_WS_KEY_BUF_LEN];
-    finlink_ws_generate_key(random_bytes, key);
-    std::memcpy(sent_key, key, FINLINK_WS_KEY_LEN);
+    char key[UNISON_WS_KEY_BUF_LEN];
+    unison_ws_generate_key(random_bytes, key);
+    std::memcpy(sent_key, key, UNISON_WS_KEY_LEN);
 
     char request[512];
     const size_t request_len =
-        finlink_ws_build_handshake_request("127.0.0.1", "/", key, request, sizeof(request));
+        unison_ws_build_handshake_request("127.0.0.1", "/", key, request, sizeof(request));
     if (request_len == 0 || !SendAll(request, request_len))
       return false;
 
-    // Accumulate bytes until finlink_ws_parse_handshake_response sees a
+    // Accumulate bytes until unison_ws_parse_handshake_response sees a
     // complete header; anything past it in the same read is already frame
     // data and must be kept, not discarded (see that function's own doc).
     for (;;)
@@ -154,13 +154,13 @@ public:
         return false;
       size_t header_len = 0;
       const auto status =
-          finlink_ws_parse_handshake_response(buffer.data(), buffer.size(), sent_key, &header_len);
-      if (status == FINLINK_WS_HANDSHAKE_OK)
+          unison_ws_parse_handshake_response(buffer.data(), buffer.size(), sent_key, &header_len);
+      if (status == UNISON_WS_HANDSHAKE_OK)
       {
         buffer.erase(buffer.begin(), buffer.begin() + static_cast<long>(header_len));
         return true;
       }
-      if (status == FINLINK_WS_HANDSHAKE_ERR)
+      if (status == UNISON_WS_HANDSHAKE_ERR)
         return false;
       // INCOMPLETE: loop and read more.
     }
@@ -172,17 +172,17 @@ public:
   {
     for (;;)
     {
-      finlink_ws_frame frame;
-      const auto status = finlink_ws_parse_frame(buffer.data(), buffer.size(), &frame);
-      if (status == FINLINK_WS_FRAME_OK)
+      unison_ws_frame frame;
+      const auto status = unison_ws_parse_frame(buffer.data(), buffer.size(), &frame);
+      if (status == UNISON_WS_FRAME_OK)
       {
-        if (frame.opcode != FINLINK_WS_OPCODE_TEXT)
+        if (frame.opcode != UNISON_WS_OPCODE_TEXT)
           return std::nullopt;
         std::string text(reinterpret_cast<char*>(frame.payload), frame.payload_size);
         buffer.erase(buffer.begin(), buffer.begin() + static_cast<long>(frame.frame_size));
         return text;
       }
-      if (status == FINLINK_WS_FRAME_ERR)
+      if (status == UNISON_WS_FRAME_ERR)
         return std::nullopt;
       if (!ReadMore())
         return std::nullopt;
@@ -192,10 +192,10 @@ public:
   bool SendTextFrame(const std::string& payload)
   {
     const uint8_t mask_key[4] = {0x11, 0x22, 0x33, 0x44};
-    const size_t max_size = finlink_ws_build_frame_max_size(payload.size());
+    const size_t max_size = unison_ws_build_frame_max_size(payload.size());
     std::vector<uint8_t> out(max_size);
     const size_t written =
-        finlink_ws_build_frame(FINLINK_WS_OPCODE_TEXT, reinterpret_cast<const uint8_t*>(payload.data()),
+        unison_ws_build_frame(UNISON_WS_OPCODE_TEXT, reinterpret_cast<const uint8_t*>(payload.data()),
                                 payload.size(), mask_key, out.data(), out.size());
     if (written == 0)
       return false;
@@ -228,20 +228,20 @@ private:
   }
 
   sf::TcpSocket socket;
-  char sent_key[FINLINK_WS_KEY_LEN];
+  char sent_key[UNISON_WS_KEY_LEN];
   std::vector<uint8_t> buffer;
 };
 
-// The full client side of the app-level handshake (finlink/handshake.h):
+// The full client side of the app-level handshake (unison/handshake.h):
 // connect, read `hello`, send `hello_ack` requesting `slot`, read the
 // server's reply. Returns nullopt on any transport/protocol failure (the
 // caller only cares about the two shapes below); on success, exactly one
 // of session_ready/handshake_error is populated, matching
-// finlink_handshake_message_type.
+// unison_handshake_message_type.
 struct HandshakeOutcome
 {
-  std::optional<finlink_session_ready> session_ready;
-  std::optional<finlink_handshake_error> handshake_error;
+  std::optional<unison_session_ready> session_ready;
+  std::optional<unison_handshake_error> handshake_error;
 };
 
 std::optional<HandshakeOutcome> PerformClientHandshake(TestClient* client, unsigned short port, int slot)
@@ -252,33 +252,33 @@ std::optional<HandshakeOutcome> PerformClientHandshake(TestClient* client, unsig
   const auto hello_text = client->ReceiveTextFrame();
   if (!hello_text)
     return std::nullopt;
-  finlink_hello hello;
-  if (finlink_parse_hello(reinterpret_cast<const uint8_t*>(hello_text->data()), hello_text->size(),
-                           &hello) != FINLINK_HANDSHAKE_OK)
+  unison_hello hello;
+  if (unison_parse_hello(reinterpret_cast<const uint8_t*>(hello_text->data()), hello_text->size(),
+                           &hello) != UNISON_HANDSHAKE_OK)
   {
     return std::nullopt;
   }
   // Real cross-check (see this file's top comment): confirms
   // GBAStreamHost::PerformAppHandshake's hand-built `hello` JSON actually
-  // parses via finlink_core's own parser, not just GBAStreamHandshake.cpp's
+  // parses via unison_core's own parser, not just GBAStreamHandshake.cpp's
   // matching picojson-based one.
   if (hello.protocol_version != GBA_STREAM_PROTOCOL_VERSION)
     return std::nullopt;
 
-  finlink_hello_ack_request req{};
+  unison_hello_ack_request req{};
   req.requested_slot = slot;
   req.max_width = 240;
   req.max_height = 160;
   req.max_fps = 60.0;
   req.wants_audio = 0;
-  // No video_mode: this checked-out Externals/finlink pin (tracks finlink's
-  // main branch, see finlink-smoke.yml's own freshness-check comment)
-  // predates that field entirely -- finlink_hello_ack_request has no such
+  // No video_mode: this checked-out Externals/unison pin (tracks Unison's
+  // main branch, see unison-smoke.yml's own freshness-check comment)
+  // predates that field entirely -- unison_hello_ack_request has no such
   // member here. Omitting it is itself valid per docs/protocol.md (an old
   // client that never sets it), not something this test needs to work
   // around.
   char ack_buf[512];
-  const size_t ack_len = finlink_build_hello_ack(&req, ack_buf, sizeof(ack_buf));
+  const size_t ack_len = unison_build_hello_ack(&req, ack_buf, sizeof(ack_buf));
   if (ack_len == 0 || !client->SendTextFrame(std::string(ack_buf, ack_len)))
     return std::nullopt;
 
@@ -286,20 +286,20 @@ std::optional<HandshakeOutcome> PerformClientHandshake(TestClient* client, unsig
   if (!reply_text)
     return std::nullopt;
   const auto* reply_bytes = reinterpret_cast<const uint8_t*>(reply_text->data());
-  const auto msg_type = finlink_peek_handshake_message(reply_bytes, reply_text->size());
+  const auto msg_type = unison_peek_handshake_message(reply_bytes, reply_text->size());
 
   HandshakeOutcome outcome;
-  if (msg_type == FINLINK_HS_MSG_SESSION_READY)
+  if (msg_type == UNISON_HS_MSG_SESSION_READY)
   {
-    finlink_session_ready ready;
-    if (finlink_parse_session_ready(reply_bytes, reply_text->size(), &ready) != FINLINK_HANDSHAKE_OK)
+    unison_session_ready ready;
+    if (unison_parse_session_ready(reply_bytes, reply_text->size(), &ready) != UNISON_HANDSHAKE_OK)
       return std::nullopt;
     outcome.session_ready = ready;
   }
-  else if (msg_type == FINLINK_HS_MSG_HANDSHAKE_ERROR)
+  else if (msg_type == UNISON_HS_MSG_HANDSHAKE_ERROR)
   {
-    finlink_handshake_error error;
-    if (finlink_parse_handshake_error(reply_bytes, reply_text->size(), &error) != FINLINK_HANDSHAKE_OK)
+    unison_handshake_error error;
+    if (unison_parse_handshake_error(reply_bytes, reply_text->size(), &error) != UNISON_HANDSHAKE_OK)
       return std::nullopt;
     outcome.handshake_error = error;
   }

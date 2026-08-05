@@ -269,14 +269,14 @@ private:
       // A plain (non-WS-upgrade) GET here is a human opening this URL in a
       // browser out of habit -- there's no page to serve any more (the web
       // client used to be embedded and served from here; it's now
-      // finlink/clients/web, a standalone client decoupled from Dolphin the
+      // unison/clients/web, a standalone client decoupled from Dolphin the
       // same way Android/3DS/Switch/NDS always were, connecting to
-      // whichever finlink server -- Dolphin included -- the user points it
+      // whichever Unison server -- Dolphin included -- the user points it
       // at). Just says so, rather than a bare/confusing connection reset.
       static constexpr std::string_view body =
-          "This is a finlink server (GBAStreamLobby), not a web page.\n"
-          "Connect with a finlink client instead -- e.g. finlink/clients/web "
-          "(github.com/alwe2710/finlink), pointed at this host and port.\n";
+          "This is a Unison server (GBAStreamLobby), not a web page.\n"
+          "Connect with a Unison client instead -- e.g. unison/clients/web "
+          "(github.com/alwe2710/Unison), pointed at this host and port.\n";
       std::ostringstream response;
       // std::to_string(), not body.size() streamed directly: an
       // ostringstream formats integers per the process's current locale

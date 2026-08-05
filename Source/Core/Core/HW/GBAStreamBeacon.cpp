@@ -24,7 +24,7 @@ namespace
 std::string BuildBeaconMessage(const std::string& local_host)
 {
   picojson::object obj;
-  obj.emplace("type", std::string("finlink_beacon"));
+  obj.emplace("type", std::string("unison_beacon"));
   obj.emplace("protocol_version", static_cast<double>(GBA_STREAM_PROTOCOL_VERSION));
   obj.emplace("emulator_identifier", std::string("Dolphin"));
   // Same source DiscordPresence.cpp / Core.cpp use for "what's currently

@@ -486,7 +486,7 @@ namespace
 // How long PerformAppHandshake waits for hello_ack before giving up on this
 // connection -- generous for a LAN round-trip, short enough that a client
 // that connected but never speaks the handshake (e.g. an old, pre-protocol-2
-// client, or a stray non-finlink connection) doesn't tie up this slot.
+// client, or a stray non-unison connection) doesn't tie up this slot.
 constexpr std::chrono::milliseconds APP_HANDSHAKE_TIMEOUT{3000};
 }  // namespace
 

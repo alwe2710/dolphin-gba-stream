@@ -11,7 +11,7 @@
 
 namespace HW::GBA
 {
-// UDP discovery beacon (finlink docs/protocol.md, "Discovery-Beacon (UDP)"):
+// UDP discovery beacon (Unison docs/protocol.md, "Discovery-Beacon (UDP)"):
 // broadcasts protocol_version/emulator_identifier/game_title/host/handshake_port
 // on GBA_STREAM_BEACON_PORT every GBA_STREAM_BEACON_INTERVAL, for as long as
 // GBAStreamLobby is running (i.e. at least one GC port is configured as GBA

@@ -4,12 +4,12 @@
 // Core/HW/GBAStreamHandshake.{h,cpp} had zero test coverage before this
 // file, despite being exactly where hello_ack.video_mode gets parsed and
 // session_ready.video_mode gets reported -- the two fields the "Video-mode
-// fallback" negotiation feature (finlink/docs/protocol.md) actually runs
+// fallback" negotiation feature (unison/docs/protocol.md) actually runs
 // on. Verified via picojson (this file's own JSON library, already linked
 // into `core` -- see GBAStreamHandshake.cpp's own includes), not
-// finlink_core: unlike Cemu/melonDS/azahar, this fork's WebSocket/JSON
-// handling predates finlink_core's extraction as a shared library and was
-// never migrated onto it (Externals/finlink is checked out but genuinely
+// unison_core: unlike Cemu/melonDS/azahar, this fork's WebSocket/JSON
+// handling predates unison_core's extraction as a shared library and was
+// never migrated onto it (Externals/unison is checked out but genuinely
 // unused anywhere in Source/, a separate, already-flagged migration this
 // test doesn't attempt as a side effect).
 

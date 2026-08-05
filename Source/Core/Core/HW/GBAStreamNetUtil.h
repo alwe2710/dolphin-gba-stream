@@ -34,7 +34,7 @@ namespace HW::GBA
 constexpr unsigned short GBA_STREAM_LOBBY_PORT = 6800;
 constexpr unsigned short GBA_STREAM_PLAYER_BASE_PORT = 6801;
 
-// Wire protocol version implemented here, per the finlink repo's
+// Wire protocol version implemented here, per the Unison repo's
 // docs/protocol.md (the single source of truth for this value and the
 // handshake/beacon messages built in GBAStreamHandshake.h). Exact-match only
 // -- no major/minor scheme. Bump this whenever a change here would require a
@@ -84,13 +84,13 @@ inline bool SendAllBytes(sf::TcpSocket& socket, const void* data, size_t size,
   // send still buffered past that point even though the peer is still very
   // much alive); 10 seconds absorbs that without meaningfully changing
   // behavior for an actually-dead peer, which was never going to un-stall
-  // in the next 7 seconds either. finlink_core now has this as a named
-  // constant, FINLINK_WS_SEND_TIMEOUT_MS (core/include/finlink/websocket.h)
+  // in the next 7 seconds either. unison_core now has this as a named
+  // constant, UNISON_WS_SEND_TIMEOUT_MS (core/include/unison/websocket.h)
   // -- not referenced here, and not just because of a stale submodule pin
   // like the other three host forks: this repo's entire WebSocket framing
   // (GBAStreamWebSocket.h, this file, GBAStreamHandshake.cpp) predates
-  // finlink_core's extraction as a shared library and never got migrated
-  // onto it -- Externals/finlink is checked out but not actually used
+  // unison_core's extraction as a shared library and never got migrated
+  // onto it -- Externals/unison is checked out but not actually used
   // anywhere in Source/. Worth revisiting as its own migration, not as a
   // side effect of this one-line timeout fix.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
