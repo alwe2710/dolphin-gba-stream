@@ -26,7 +26,7 @@
 namespace HW::GBA
 {
 
-class GBAStreamVideoEncoder;
+class SoftwareVideoEncoder;
 
 // GBAHostInterface implementation backing the "GBA (Client-Stream)" SI device.
 //
@@ -105,7 +105,7 @@ private:
   void RunWebSocketSession(sf::TcpSocket& socket);
   void SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
                                std::vector<u8>* previous_rgb565,
-                               std::unique_ptr<GBAStreamVideoEncoder>* video_encoder);
+                               std::unique_ptr<SoftwareVideoEncoder>* video_encoder);
   void SendAudioIfPending(sf::TcpSocket& socket);
 
   void AttachInputOverride();
@@ -174,7 +174,7 @@ private:
   // otherwise (this stream type's existing adaptive tiles/raw heuristic
   // stays the fallback, not "legacy" -- see GBAStreamHandshake.h's own
   // HandshakeAck::video_mode comment) -- read by SendVideoFrameIfPending to
-  // decide whether to run the GBAStreamVideoEncoder path at all. Same
+  // decide whether to run the SoftwareVideoEncoder path at all. Same
   // optimistic-echo caveat as m_negotiated_width et al: PerformAppHandshake
   // decides this before the encoder is ever actually constructed.
   std::string m_video_mode = "tiles";

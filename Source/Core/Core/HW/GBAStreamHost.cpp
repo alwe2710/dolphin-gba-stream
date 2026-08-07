@@ -32,7 +32,7 @@
 #include "Core/HW/GBAStreamHandshake.h"
 #include "Core/HW/GBAStreamLobby.h"
 #include "Core/HW/GBAStreamNetUtil.h"
-#include "Core/HW/GBAStreamVideoEncoder.h"
+#include "Core/HW/SoftwareVideoEncoder.h"
 #include "Core/HW/GBAStreamWebSocket.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
@@ -608,7 +608,7 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
   // Optimistic-echo, per GBAStreamHandshake.h's own BuildSessionReadyMessage()
   // comment: "h264"/"h265" are reported as requested even though
   // SendVideoFrameIfPending() might still fail to open that
-  // GBAStreamVideoEncoder later this session (falling back to the existing
+  // SoftwareVideoEncoder later this session (falling back to the existing
   // adaptive tiles/raw heuristic, not "legacy" -- this stream type has
   // always had a real non-h264/h265 encoder, unlike azahar/melonDS's plain
   // raw-frame fallback). Anything else requested (including "legacy",
@@ -678,7 +678,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
     // null (rather than built here) when m_video_mode isn't h264/h265 at
     // all; SendVideoFrameIfPending() itself lazily constructs it on the
     // first frame that actually needs it.
-    std::unique_ptr<GBAStreamVideoEncoder> video_encoder;
+    std::unique_ptr<SoftwareVideoEncoder> video_encoder;
     while (!m_stop && !session_stop)
     {
       {
@@ -753,7 +753,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
 
 void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
                                             std::vector<u8>* previous_rgb565,
-                                            std::unique_ptr<GBAStreamVideoEncoder>* video_encoder)
+                                            std::unique_ptr<SoftwareVideoEncoder>* video_encoder)
 {
   std::vector<u32> frame;
   u32 width = 0;
@@ -789,7 +789,7 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
     // RGBA8 straight from `frame`'s raw u32 pixels (same R=byte0/G=byte1/
     // B=byte2 layout SendVideoFrameIfPending's rgb565 conversion below
     // already documents) -- built independently of the rgb565/tiles path,
-    // not derived from it, since GBAStreamVideoEncoder needs 8-bit-per-
+    // not derived from it, since SoftwareVideoEncoder needs 8-bit-per-
     // channel color the lossy RGB565 round-trip would already have
     // discarded precision from.
     std::vector<u8> rgba8(static_cast<size_t>(width) * height * 4);
@@ -813,14 +813,14 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
 
     // (Re)build whenever there's no encoder yet (first h264/h265 frame this
     // session) or the negotiated size no longer matches what the current
-    // one was built for -- see GBAStreamVideoEncoder::Width()'s own comment
+    // one was built for -- see SoftwareVideoEncoder::Width()'s own comment
     // on why this can legitimately change (a differently-negotiated session
     // reusing this same GBAStreamHost, not a mid-session resolution change
     // the way Cemu's WIIU_GAMEPAD sees -- GBA content itself never resizes).
     if (!*video_encoder || (*video_encoder)->Width() != encode_width ||
         (*video_encoder)->Height() != encode_height)
     {
-      *video_encoder = std::make_unique<GBAStreamVideoEncoder>(
+      *video_encoder = std::make_unique<SoftwareVideoEncoder>(
           m_video_mode == "h264" ? VideoCodec::H264 : VideoCodec::H265, encode_width,
           encode_height, static_cast<uint32_t>(m_negotiated_fps));
     }
@@ -836,7 +836,7 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
         message.reserve(10 + nals.size());
         message.push_back(MSG_TYPE_VIDEO_FRAME);
         // Coded (padded, macroblock/CTU-aligned) dimensions, not
-        // encode_width/height directly -- see GBAStreamVideoEncoder::
+        // encode_width/height directly -- see SoftwareVideoEncoder::
         // CodedWidth()'s own comment.
         AppendU32LE(&message, (*video_encoder)->CodedWidth());
         AppendU32LE(&message, (*video_encoder)->CodedHeight());

@@ -73,7 +73,7 @@ struct AudioLimits
 
 // What the client sends back in `hello_ack`. video_mode (Unison's
 // protocol.md "tiles"/"legacy"/"h264"/"h265", empty if unset/unrecognized):
-// "h264"/"h265" get a real GBAStreamVideoEncoder (see GBAStreamHost.cpp's
+// "h264"/"h265" get a real SoftwareVideoEncoder (see GBAStreamHost.cpp's
 // SendVideoFrameIfPending); anything else falls back to this stream type's
 // existing tile-vs-raw choice (`use_tiles`, a per-frame adaptive heuristic
 // that was never driven by this field and still isn't) -- there's no
@@ -127,7 +127,7 @@ std::optional<HandshakeAck> ParseHelloAck(const std::vector<u8>& payload);
 // passes the fixed "tiles" (it never actually streams video, see its own
 // call site) -- GBAStreamHost.cpp's real player-port session now passes
 // whatever PerformAppHandshake() decided ("h264"/"h265" if requested and
-// GBAStreamVideoEncoder construction is attempted, "tiles" otherwise; see
+// SoftwareVideoEncoder construction is attempted, "tiles" otherwise; see
 // SendVideoFrameIfPending()'s own h264/h265 branch and HandshakeAck::
 // video_mode's own comment for how that decision is made). Either way this
 // function itself doesn't decide anything, it only reports what the caller

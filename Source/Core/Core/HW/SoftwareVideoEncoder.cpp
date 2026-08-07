@@ -3,7 +3,7 @@
 
 #ifdef HAS_LIBMGBA
 
-#include "Core/HW/GBAStreamVideoEncoder.h"
+#include "Core/HW/SoftwareVideoEncoder.h"
 
 #include <x264.h>
 #include <x265.h>
@@ -57,7 +57,7 @@ constexpr int kVbvBufferKbits = 100;
 
 }  // namespace
 
-GBAStreamVideoEncoder::GBAStreamVideoEncoder(VideoCodec codec, uint32_t width, uint32_t height,
+SoftwareVideoEncoder::SoftwareVideoEncoder(VideoCodec codec, uint32_t width, uint32_t height,
                                               uint32_t fps)
     : m_codec(codec), m_width(width), m_height(height), m_codedWidth(RoundUpTo16(width)),
       m_codedHeight(RoundUpTo16(height)), m_fps(fps == 0 ? 20 : fps)
@@ -133,7 +133,7 @@ GBAStreamVideoEncoder::GBAStreamVideoEncoder(VideoCodec codec, uint32_t width, u
   }
 }
 
-GBAStreamVideoEncoder::~GBAStreamVideoEncoder()
+SoftwareVideoEncoder::~SoftwareVideoEncoder()
 {
   if (!m_encoderHandle)
     return;
@@ -143,7 +143,7 @@ GBAStreamVideoEncoder::~GBAStreamVideoEncoder()
     x265_encoder_close((x265_encoder*)m_encoderHandle);
 }
 
-void GBAStreamVideoEncoder::ConvertRgba8ToI420(const uint8_t* rgba8)
+void SoftwareVideoEncoder::ConvertRgba8ToI420(const uint8_t* rgba8)
 {
   // Writes the full m_codedWidth x m_codedHeight plane (see m_codedWidth's
   // own comment on why the coded picture can be larger than the real
@@ -201,7 +201,7 @@ void GBAStreamVideoEncoder::ConvertRgba8ToI420(const uint8_t* rgba8)
   }
 }
 
-bool GBAStreamVideoEncoder::EncodeFrame(const uint8_t* rgba8, std::vector<uint8_t>& outNals)
+bool SoftwareVideoEncoder::EncodeFrame(const uint8_t* rgba8, std::vector<uint8_t>& outNals)
 {
   if (!m_encoderHandle)
     return false;

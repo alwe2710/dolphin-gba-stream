@@ -36,7 +36,7 @@ enum class VideoCodec
 // for why the keyframe cadence exists (a continuous bitstream, unlike
 // TILES/legacy, so a dropped frame needs a bounded self-heal instead of
 // just resending state next frame).
-class GBAStreamVideoEncoder
+class SoftwareVideoEncoder
 {
 public:
   // fps is the *effective* rate this session actually sends at
@@ -44,11 +44,11 @@ public:
   // the client asked for less -- see GBAStreamHandshake.h's NegotiateVideo())
   // -- used for encoder rate-control pacing and to derive the forced-
   // keyframe interval, not treated as a hard per-frame clock.
-  GBAStreamVideoEncoder(VideoCodec codec, uint32_t width, uint32_t height, uint32_t fps);
-  ~GBAStreamVideoEncoder();
+  SoftwareVideoEncoder(VideoCodec codec, uint32_t width, uint32_t height, uint32_t fps);
+  ~SoftwareVideoEncoder();
 
-  GBAStreamVideoEncoder(const GBAStreamVideoEncoder&) = delete;
-  GBAStreamVideoEncoder& operator=(const GBAStreamVideoEncoder&) = delete;
+  SoftwareVideoEncoder(const SoftwareVideoEncoder&) = delete;
+  SoftwareVideoEncoder& operator=(const SoftwareVideoEncoder&) = delete;
 
   // True if the encoder opened successfully -- check before calling
   // EncodeFrame(); a construction failure (e.g. codec init rejected the
@@ -125,7 +125,7 @@ private:
   // Exactly one real encoder handle type is ever behind this, depending on
   // m_codec -- opaque void* here so this header doesn't need to expose
   // x264.h/x265.h (and their near-identical but distinct types) to every
-  // includer; GBAStreamVideoEncoder.cpp is the only translation unit that
+  // includer; SoftwareVideoEncoder.cpp is the only translation unit that
   // needs the real encoder types.
   void* m_encoderHandle = nullptr;
 };
