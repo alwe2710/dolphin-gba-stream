@@ -32,6 +32,7 @@
 #include "Core/HW/GBAStreamHandshake.h"
 #include "Core/HW/GBAStreamLobby.h"
 #include "Core/HW/GBAStreamNetUtil.h"
+#include "Core/HW/GBAStreamVideoEncoder.h"
 #include "Core/HW/GBAStreamWebSocket.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
@@ -80,6 +81,17 @@ constexpr u8 MSG_TYPE_PONG = 0x05;
 constexpr u8 VIDEO_FORMAT_RAW = 0x00;
 constexpr u8 VIDEO_FORMAT_INDEXED = 0x01;
 constexpr u8 VIDEO_FORMAT_TILES = 0x02;
+// Mutually exclusive with INDEXED/TILES above: the payload is a raw (not
+// deflate-compressed) Annex-B H.264/H.265 NAL bitstream instead of a
+// decompress-then-decode RGB565/indexed block -- see SendVideoFrameIfPending()'s
+// own h264/h265 branch. Bit positions match Unison's UNISON_VIDEO_FORMAT_H264/
+// _H265 (unison/core/include/unison/protocol.h, still-unmerged "transcoding"
+// branch at the time this was added -- see GBAStreamHandshake.h's own
+// video_mode comment), kept as local hand-rolled constants the same way
+// VIDEO_FORMAT_RAW/INDEXED/TILES above already are rather than pulling in
+// unison_core's own enum for two values.
+constexpr u8 VIDEO_FORMAT_H264 = 0x04;
+constexpr u8 VIDEO_FORMAT_H265 = 0x08;
 constexpr size_t MAX_PALETTE_COLORS = 256;
 
 // 8x8 evenly divides the fixed 240x160 GBA screen (30x20 tiles) with no
@@ -187,6 +199,33 @@ std::vector<u8> DownscaleRgb565(const std::vector<u8>& src, u32 src_width, u32 s
       const size_t dst_index = (static_cast<size_t>(y) * dst_width + x) * 2;
       dst[dst_index] = src[src_index];
       dst[dst_index + 1] = src[src_index + 1];
+    }
+  }
+  return dst;
+}
+
+// RGBA8 counterpart to DownscaleRgb565 above -- same nearest-neighbor
+// point-sample tradeoff (see that function's own comment), just 4 bytes/
+// pixel instead of 2. Used for the h264/h265 path's own capture-to-encoder
+// buffer, which (unlike the tiles/legacy path) is built directly from
+// `frame`'s raw u32 pixels rather than going through rgb565 first, so it
+// needs its own downscale rather than reusing DownscaleRgb565.
+std::vector<u8> DownscaleRgba8(const std::vector<u8>& src, u32 src_width, u32 src_height,
+                               u32 dst_width, u32 dst_height)
+{
+  std::vector<u8> dst(static_cast<size_t>(dst_width) * dst_height * 4);
+  for (u32 y = 0; y < dst_height; ++y)
+  {
+    const u32 src_y = std::min(src_height - 1, y * src_height / dst_height);
+    for (u32 x = 0; x < dst_width; ++x)
+    {
+      const u32 src_x = std::min(src_width - 1, x * src_width / dst_width);
+      const size_t src_index = (static_cast<size_t>(src_y) * src_width + src_x) * 4;
+      const size_t dst_index = (static_cast<size_t>(y) * dst_width + x) * 4;
+      dst[dst_index + 0] = src[src_index + 0];
+      dst[dst_index + 1] = src[src_index + 1];
+      dst[dst_index + 2] = src[src_index + 2];
+      dst[dst_index + 3] = src[src_index + 3];
     }
   }
   return dst;
@@ -566,10 +605,22 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
   if (ack->audio_limits)
     negotiated_audio = NegotiateAudio(native_sample_rate, native_channels, *ack->audio_limits);
 
+  // Optimistic-echo, per GBAStreamHandshake.h's own BuildSessionReadyMessage()
+  // comment: "h264"/"h265" are reported as requested even though
+  // SendVideoFrameIfPending() might still fail to open that
+  // GBAStreamVideoEncoder later this session (falling back to the existing
+  // adaptive tiles/raw heuristic, not "legacy" -- this stream type has
+  // always had a real non-h264/h265 encoder, unlike azahar/melonDS's plain
+  // raw-frame fallback). Anything else requested (including "legacy",
+  // which this stream type has never sent -- it's always at least tiles-
+  // capable) falls back to "tiles" up front.
+  const std::string video_mode =
+      (ack->video_mode == "h264" || ack->video_mode == "h265") ? ack->video_mode : "tiles";
+
   if (!SendWebSocketTextFrame(
           socket, BuildSessionReadyMessage(m_device_number, negotiated_video, negotiated_audio,
                                            std::nullopt /* redirect: this is the terminal port */,
-                                           "tiles" /* see GBAStreamHandshake.h's own comment */),
+                                           video_mode),
           m_stop))
   {
     return false;
@@ -578,6 +629,7 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
   m_negotiated_width = negotiated_video.width;
   m_negotiated_height = negotiated_video.height;
   m_negotiated_fps = negotiated_video.fps;
+  m_video_mode = video_mode;
   m_audio_enabled = negotiated_audio.has_value();
   m_negotiated_audio_channels = negotiated_audio ? negotiated_audio->channels : native_channels;
   m_last_video_send_time = std::chrono::steady_clock::time_point{};
@@ -621,11 +673,17 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
   std::thread writer_thread([this, &socket, &send_mutex, &session_stop] {
     u64 last_sent_frame_id = 0;
     std::vector<u8> previous_rgb565;
+    // Session-local, not a member -- same reasoning as previous_rgb565
+    // above: encoder reference-frame state must never cross sessions. Left
+    // null (rather than built here) when m_video_mode isn't h264/h265 at
+    // all; SendVideoFrameIfPending() itself lazily constructs it on the
+    // first frame that actually needs it.
+    std::unique_ptr<GBAStreamVideoEncoder> video_encoder;
     while (!m_stop && !session_stop)
     {
       {
         std::lock_guard<std::mutex> lock(send_mutex);
-        SendVideoFrameIfPending(socket, &last_sent_frame_id, &previous_rgb565);
+        SendVideoFrameIfPending(socket, &last_sent_frame_id, &previous_rgb565, &video_encoder);
         SendAudioIfPending(socket);
       }
       if (m_stop || session_stop)
@@ -694,7 +752,8 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
 }
 
 void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
-                                            std::vector<u8>* previous_rgb565)
+                                            std::vector<u8>* previous_rgb565,
+                                            std::unique_ptr<GBAStreamVideoEncoder>* video_encoder)
 {
   std::vector<u32> frame;
   u32 width = 0;
@@ -723,6 +782,80 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
     const bool sent_before = m_last_video_send_time.time_since_epoch().count() != 0;
     if (sent_before && std::chrono::steady_clock::now() - m_last_video_send_time < min_interval)
       return;
+  }
+
+  if (m_video_mode == "h264" || m_video_mode == "h265")
+  {
+    // RGBA8 straight from `frame`'s raw u32 pixels (same R=byte0/G=byte1/
+    // B=byte2 layout SendVideoFrameIfPending's rgb565 conversion below
+    // already documents) -- built independently of the rgb565/tiles path,
+    // not derived from it, since GBAStreamVideoEncoder needs 8-bit-per-
+    // channel color the lossy RGB565 round-trip would already have
+    // discarded precision from.
+    std::vector<u8> rgba8(static_cast<size_t>(width) * height * 4);
+    for (size_t i = 0; i < frame.size(); ++i)
+    {
+      const u32 pixel = frame[i];
+      rgba8[i * 4 + 0] = static_cast<u8>(pixel & 0xFF);         // R
+      rgba8[i * 4 + 1] = static_cast<u8>((pixel >> 8) & 0xFF);  // G
+      rgba8[i * 4 + 2] = static_cast<u8>((pixel >> 16) & 0xFF); // B
+      rgba8[i * 4 + 3] = 0xFF;                                  // A (unused by the encoder)
+    }
+
+    u32 encode_width = width;
+    u32 encode_height = height;
+    if (m_negotiated_width != width || m_negotiated_height != height)
+    {
+      rgba8 = DownscaleRgba8(rgba8, width, height, m_negotiated_width, m_negotiated_height);
+      encode_width = m_negotiated_width;
+      encode_height = m_negotiated_height;
+    }
+
+    // (Re)build whenever there's no encoder yet (first h264/h265 frame this
+    // session) or the negotiated size no longer matches what the current
+    // one was built for -- see GBAStreamVideoEncoder::Width()'s own comment
+    // on why this can legitimately change (a differently-negotiated session
+    // reusing this same GBAStreamHost, not a mid-session resolution change
+    // the way Cemu's WIIU_GAMEPAD sees -- GBA content itself never resizes).
+    if (!*video_encoder || (*video_encoder)->Width() != encode_width ||
+        (*video_encoder)->Height() != encode_height)
+    {
+      *video_encoder = std::make_unique<GBAStreamVideoEncoder>(
+          m_video_mode == "h264" ? VideoCodec::H264 : VideoCodec::H265, encode_width,
+          encode_height, static_cast<uint32_t>(m_negotiated_fps));
+    }
+
+    if ((*video_encoder)->IsValid())
+    {
+      std::vector<u8> nals;
+      if (!(*video_encoder)->EncodeFrame(rgba8.data(), nals))
+        return;  // Real encoder error -- skip this frame rather than kill the session.
+      if (!nals.empty())
+      {
+        std::vector<u8> message;
+        message.reserve(10 + nals.size());
+        message.push_back(MSG_TYPE_VIDEO_FRAME);
+        // Coded (padded, macroblock/CTU-aligned) dimensions, not
+        // encode_width/height directly -- see GBAStreamVideoEncoder::
+        // CodedWidth()'s own comment.
+        AppendU32LE(&message, (*video_encoder)->CodedWidth());
+        AppendU32LE(&message, (*video_encoder)->CodedHeight());
+        message.push_back(m_video_mode == "h264" ? VIDEO_FORMAT_H264 : VIDEO_FORMAT_H265);
+        message.insert(message.end(), nals.begin(), nals.end());
+        if (SendWebSocketBinaryFrame(socket, message, m_stop))
+          m_last_video_send_time = std::chrono::steady_clock::now();
+      }
+      // Whether or not this call produced output (encoder look-ahead
+      // buffering, see EncodeFrame()'s own comment), h264/h265 never falls
+      // through to the raw rgb565 path below -- ServeConnection() already
+      // committed to this mode in session_ready.
+      return;
+    }
+    // Real encoder-open failure -- fall through to the raw RGB565 path
+    // below rather than send nothing for the rest of the session.
+    // PerformAppHandshake() already reported "tiles" in session_ready for
+    // this case (see its own comment), so the client isn't expecting
+    // h264/h265 frames that would never arrive.
   }
 
   std::vector<u8> rgb565(static_cast<size_t>(width) * height * 2);

@@ -72,12 +72,13 @@ struct AudioLimits
 };
 
 // What the client sends back in `hello_ack`. video_mode (Unison's
-// protocol.md "tiles"/"legacy"/"h264"/"h265", empty if unset/unrecognized)
-// is parsed only so the server can honestly report its fallback in
-// session_ready.video_mode -- this stream type's tile-vs-raw choice
-// (GBAStreamHost.cpp's SendVideoFrameIfPending, `use_tiles`) is a per-frame
-// adaptive heuristic, not driven by this request at all, and there's no
-// H.264/H.265 encoder here either way.
+// protocol.md "tiles"/"legacy"/"h264"/"h265", empty if unset/unrecognized):
+// "h264"/"h265" get a real GBAStreamVideoEncoder (see GBAStreamHost.cpp's
+// SendVideoFrameIfPending); anything else falls back to this stream type's
+// existing tile-vs-raw choice (`use_tiles`, a per-frame adaptive heuristic
+// that was never driven by this field and still isn't) -- there's no
+// "legacy" mode here, this stream type has always been at least
+// tiles-capable, unlike azahar/melonDS's plain-raw-frame-only fallback.
 struct HandshakeAck
 {
   int protocol_version;
@@ -122,12 +123,15 @@ std::string BuildHelloMessage(const HandshakeOffer& offer);
 // HandshakeErrorCode::MalformedRequest.
 std::optional<HandshakeAck> ParseHelloAck(const std::vector<u8>& payload);
 
-// video_mode: always the fixed declared capability "tiles" at both call
-// sites (GBAStreamHost.cpp's real player-port session, and
-// GBAStreamLobby.cpp's redirect-hop placeholder reply) -- this stream type
-// can and does use TILES adaptively (never H.264/H.265), see
-// GBAStreamHandshake.h's own HandshakeAck::video_mode comment for why this
-// isn't driven by the per-frame use_tiles heuristic.
+// video_mode: GBAStreamLobby.cpp's redirect-hop placeholder reply always
+// passes the fixed "tiles" (it never actually streams video, see its own
+// call site) -- GBAStreamHost.cpp's real player-port session now passes
+// whatever PerformAppHandshake() decided ("h264"/"h265" if requested and
+// GBAStreamVideoEncoder construction is attempted, "tiles" otherwise; see
+// SendVideoFrameIfPending()'s own h264/h265 branch and HandshakeAck::
+// video_mode's own comment for how that decision is made). Either way this
+// function itself doesn't decide anything, it only reports what the caller
+// already chose.
 std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
                                       const std::optional<NegotiatedAudio>& audio,
                                       const std::optional<HandshakeRedirect>& redirect,

@@ -754,12 +754,24 @@ if(USE_MGBA)
     HW/GBAStreamLobby.cpp
     HW/GBAStreamLobby.h
     HW/GBAStreamNetUtil.h
+    HW/GBAStreamVideoEncoder.cpp
+    HW/GBAStreamVideoEncoder.h
     HW/GBAStreamWebSocket.h
     HW/SI/SI_DeviceGBAEmu.cpp
     HW/SI/SI_DeviceGBAEmu.h
   )
   target_link_libraries(core PUBLIC mGBA::mgba ZLIB::ZLIB)
   target_compile_definitions(core PUBLIC -DHAS_LIBMGBA)
+
+  # GBAStreamVideoEncoder.cpp's h264/h265 encode path -- system libraries
+  # via pkg-config, same libraries Cemu's own sibling port links via vcpkg
+  # and azahar's/melonDS's own re-ports link via pkg-config too (no vcpkg
+  # manifest exists in this project either, so pkg-config against a
+  # system/distro install is the equivalent here), not vendored/bundled.
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(X264 REQUIRED IMPORTED_TARGET x264)
+  pkg_check_modules(X265 REQUIRED IMPORTED_TARGET x265)
+  target_link_libraries(core PUBLIC PkgConfig::X264 PkgConfig::X265)
 endif()
 
 if(WIN32)

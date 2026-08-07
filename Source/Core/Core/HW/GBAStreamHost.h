@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -24,6 +25,9 @@
 
 namespace HW::GBA
 {
+
+class GBAStreamVideoEncoder;
+
 // GBAHostInterface implementation backing the "GBA (Client-Stream)" SI device.
 //
 // One instance per GC port configured as GBA (Client-Stream), each listening
@@ -100,7 +104,8 @@ private:
   bool PerformAppHandshake(sf::TcpSocket& socket);
   void RunWebSocketSession(sf::TcpSocket& socket);
   void SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
-                               std::vector<u8>* previous_rgb565);
+                               std::vector<u8>* previous_rgb565,
+                               std::unique_ptr<GBAStreamVideoEncoder>* video_encoder);
   void SendAudioIfPending(sf::TcpSocket& socket);
 
   void AttachInputOverride();
@@ -165,6 +170,14 @@ private:
   u32 m_negotiated_width = GBA_NATIVE_WIDTH;
   u32 m_negotiated_height = GBA_NATIVE_HEIGHT;
   double m_negotiated_fps = GBA_NATIVE_FPS;
+  // "h264"/"h265" only if that's what hello_ack requested, "tiles"
+  // otherwise (this stream type's existing adaptive tiles/raw heuristic
+  // stays the fallback, not "legacy" -- see GBAStreamHandshake.h's own
+  // HandshakeAck::video_mode comment) -- read by SendVideoFrameIfPending to
+  // decide whether to run the GBAStreamVideoEncoder path at all. Same
+  // optimistic-echo caveat as m_negotiated_width et al: PerformAppHandshake
+  // decides this before the encoder is ever actually constructed.
+  std::string m_video_mode = "tiles";
   bool m_audio_enabled = true;
   u8 m_negotiated_audio_channels = 2;
   std::chrono::steady_clock::time_point m_last_video_send_time{};
