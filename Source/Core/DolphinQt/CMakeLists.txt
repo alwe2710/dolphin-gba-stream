@@ -87,6 +87,8 @@ add_executable(dolphin-emu
   Config/FreeLookWidget.h
   Config/FreeLookWindow.cpp
   Config/FreeLookWindow.h
+  Config/GBAStreamSlotDialog.cpp
+  Config/GBAStreamSlotDialog.h
   Config/GameConfigEdit.cpp
   Config/GameConfigEdit.h
   Config/GameConfigHighlighter.cpp

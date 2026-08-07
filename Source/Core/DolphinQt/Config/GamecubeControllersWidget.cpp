@@ -19,6 +19,7 @@
 #include "Core/NetPlayProto.h"
 #include "Core/System.h"
 
+#include "DolphinQt/Config/GBAStreamSlotDialog.h"
 #include "DolphinQt/Config/Mapping/GCPadWiiUConfigDialog.h"
 #include "DolphinQt/Config/Mapping/MappingWindow.h"
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
@@ -118,9 +119,13 @@ void GamecubeControllersWidget::OnGCTypeChanged(size_t index)
 {
   const SerialInterface::SIDevices si_device =
       FromGCMenuIndex(m_gc_controller_boxes[index]->currentIndex());
+  // GC_GBA_STREAM used to be excluded here alongside GC_GBA (the old TCP
+  // protocol, still unconfigurable from here) -- reverted: a stream port
+  // does have something this button should open, see OnGCPadConfigure's own
+  // GC_GBA_STREAM case (a ROM picker, not the generic button-mapping window
+  // every other enabled device type below gets).
   m_gc_buttons[index]->setEnabled(si_device != SerialInterface::SIDEVICE_NONE &&
-                                  si_device != SerialInterface::SIDEVICE_GC_GBA &&
-                                  si_device != SerialInterface::SIDEVICE_GC_GBA_STREAM);
+                                  si_device != SerialInterface::SIDEVICE_GC_GBA);
 }
 
 void GamecubeControllersWidget::OnGCPadConfigure(size_t index)
@@ -150,8 +155,28 @@ void GamecubeControllersWidget::OnGCPadConfigure(size_t index)
   case SerialInterface::SIDEVICE_GC_TARUKONGA:
     type = MappingWindow::Type::MAPPING_GC_BONGOS;
     break;
-  case SerialInterface::SIDEVICE_GC_GBA_EMULATED:
   case SerialInterface::SIDEVICE_GC_GBA_STREAM:
+  {
+    // Not the generic per-button MappingWindow every other case here opens
+    // -- a Unison stream client has no local buttons on this host to map at
+    // all, that window would just be empty. What actually wants
+    // configuring per-port here is which ROM this slot boots, see
+    // GBAStreamSlotDialog's own header comment.
+    //
+    // #ifdef, not just relying on the enum case existing unconditionally
+    // (SI_Device.h declares it either way): GBAStreamSlotDialog itself only
+    // exists under HAS_LIBMGBA (it edits Config::MAIN_GBA_ROM_PATHS, which
+    // doesn't exist otherwise), same reason this device type is never
+    // actually selectable in the combo box above without it either (see
+    // s_gc_types) -- so this branch is unreachable there, but still has to
+    // compile.
+#ifdef HAS_LIBMGBA
+    GBAStreamSlotDialog dialog(static_cast<int>(index), this);
+    dialog.exec();
+#endif
+    return;
+  }
+  case SerialInterface::SIDEVICE_GC_GBA_EMULATED:
     type = MappingWindow::Type::MAPPING_GC_GBA;
     break;
   case SerialInterface::SIDEVICE_GC_KEYBOARD:
