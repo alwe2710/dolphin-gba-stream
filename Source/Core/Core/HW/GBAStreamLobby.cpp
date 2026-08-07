@@ -36,9 +36,26 @@ namespace HW::GBA
 {
 namespace
 {
-// How long the lobby waits for hello_ack once it's sent `hello`, same
-// reasoning and value as GBAStreamHost's PerformAppHandshake.
-constexpr std::chrono::milliseconds APP_HANDSHAKE_TIMEOUT{3000};
+// How long the lobby waits for hello_ack once it's sent `hello`. Used to
+// share GBAStreamHost::PerformAppHandshake's own 3000ms value/reasoning
+// verbatim -- wrong for this call site specifically: GBAStreamHost's
+// hello_ack is built and sent by client code automatically, essentially
+// instantly, the moment its own hello arrives, so 3s is already generous
+// slack for that. This lobby's hello_ack, by contrast, only goes out once a
+// *human* has actually looked at the slot picker (unison/clients/web's
+// #lobby, or the equivalent native screen) and clicked a slot -- a real
+// person reliably takes longer than 3s to do that, especially if multiple
+// players are coordinating who takes which slot. Confirmed live (temporary
+// Playwright repro against a running build) that a completely ordinary,
+// unhurried slot pick blew straight through the old 3000ms and got the
+// connection silently dropped server-side, with the client just stuck on
+// "Connecting..." forever -- this is a separate, independent constant from
+// GBAStreamHost.cpp's (each file declares its own in its own anonymous
+// namespace), so raising it here has no effect on that automatic-reply
+// path's own timeout. Each lobby connection already runs on its own thread
+// (see AcceptLoop's own comment on why), so a slow/abandoned pick here
+// doesn't block any other prospective client either.
+constexpr std::chrono::milliseconds APP_HANDSHAKE_TIMEOUT{120000};
 
 // Every GC port currently configured as GBA (Client-Stream) -- i.e. every
 // device_number a GBAStreamHost instance exists for right now. Mirrors
