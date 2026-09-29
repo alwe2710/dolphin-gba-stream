@@ -101,7 +101,7 @@ jobs:
             libusb-1.0-0-dev libsfml-dev libminiupnpc-dev libcurl4-openssl-dev \
             libhidapi-dev libsystemd-dev libgtest-dev libasound2-dev libpulse-dev \
             llvm-dev libbluetooth-dev qt6-base-dev qt6-base-private-dev qt6-svg-dev gettext \
-            ninja-build
+            ninja-build libx264-dev libx265-dev
 
       - name: Configure
         run: cmake --preset ninja-release-x64
