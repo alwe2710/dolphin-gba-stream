@@ -695,6 +695,23 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
         m_stop);
     return false;
   }
+  // Opt-out from the dedicated UDP channel (docs/protocol.md, "Dedicated
+  // video/audio channel (UDP)") -- clients/web is the one real client
+  // that ever sets this (no raw socket API in a browser at all). This
+  // stream type has no TCP fallback left to offer such a client instead
+  // -- so a client that can't use UDP genuinely cannot stream
+  // GC_GBA_LINK video/audio at all right now; reject clearly rather than
+  // connect it to a session that will never show a frame.
+  if (ack->no_udp_video)
+  {
+    SendWebSocketTextFrame(
+        socket,
+        BuildHandshakeErrorMessage(HandshakeErrorCode::UdpVideoRequired,
+                                   "Dieser Client kann keine UDP-Verbindung aufbauen, GC_GBA_LINK "
+                                   "bietet aber keinen TCP-Fallback mehr an"),
+        m_stop);
+    return false;
+  }
 
   const NegotiatedVideo negotiated_video =
       NegotiateVideo(GBA_NATIVE_WIDTH, GBA_NATIVE_HEIGHT, GBA_NATIVE_FPS, ack->video_limits);
