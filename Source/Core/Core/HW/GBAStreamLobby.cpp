@@ -190,7 +190,8 @@ void PerformHandshakeAndRedirect(sf::TcpSocket& socket, const HttpRequest& reque
       static_cast<u16>(GBA_STREAM_PLAYER_BASE_PORT + ack->requested_slot)};
   SendWebSocketTextFrame(
       socket, BuildSessionReadyMessage(ack->requested_slot, native_video, std::nullopt, redirect,
-                                        "tiles" /* placeholder, see comment above */),
+                                        "tiles" /* placeholder, see comment above */,
+                                        std::nullopt /* this connection never streams, see comment above */),
       stop_flag);
 }
 

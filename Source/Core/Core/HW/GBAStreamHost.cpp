@@ -21,6 +21,7 @@
 #include <zlib.h>
 
 #include <SFML/Network/SocketSelector.hpp>
+#include <SFML/Network/UdpSocket.hpp>
 #include <SFML/System/Time.hpp>
 
 #include "Common/CommonTypes.h"
@@ -61,6 +62,66 @@ constexpr u8 MSG_TYPE_AUDIO = 0x03;
 // the client's latency-monitoring UI show a real ping instead of a guess.
 constexpr u8 MSG_TYPE_PING = 0x04;
 constexpr u8 MSG_TYPE_PONG = 0x05;
+// Client->server, UDP-only, dedicated video/audio channel rendezvous (see
+// GBAStreamHost::WaitForVideoHello) -- the client's own "hello" so this
+// server learns its source address/port; empty payload,
+// fragment_index/fragment_count both 0. Never appears on the TCP control
+// connection. Matches UNISON_MSG_UDP_HELLO's value (unison/core/include/
+// unison/protocol.h) -- this fork hand-rolls its own wire format rather
+// than depending on unison_core (see this file's own MSG_TYPE_* comments
+// above), but the two are the same protocol per docs/protocol.md, so the
+// values must agree even though the code doesn't share a header.
+constexpr u8 MSG_TYPE_UDP_HELLO = 0x08;
+
+// Docs/protocol.md's "Dedicated video/audio channel (UDP)" fragment
+// framing, hand-rolled here the same way the rest of this file's wire
+// format is (see MSG_TYPE_* above) rather than depending on unison_core.
+// Layout: msg_type (u8), frame_id (u32le), fragment_index (u16le),
+// fragment_count (u16le) -- 9 bytes total, matching
+// unison_udp_fragment_header/UNISON_UDP_FRAGMENT_HEADER_SIZE exactly.
+constexpr size_t UDP_FRAGMENT_HEADER_SIZE = 9;
+// Same reasoning/value as UNISON_UDP_MAX_FRAGMENT_PAYLOAD: conservative
+// under typical MTU (1500) minus IP/UDP overhead and margin for
+// VPNs/tunnels. Every fragment except possibly the last carries EXACTLY
+// this many bytes -- a receiver assembling out-of-order fragments places
+// fragment i at byte offset i * UDP_MAX_FRAGMENT_PAYLOAD, which only
+// works if both sides agree on this exact constant.
+constexpr size_t UDP_MAX_DATAGRAM_SIZE = 1200;
+constexpr size_t UDP_MAX_FRAGMENT_PAYLOAD = UDP_MAX_DATAGRAM_SIZE - UDP_FRAGMENT_HEADER_SIZE;
+
+void AppendUdpFragmentHeader(std::vector<u8>* out, u8 msg_type, u32 frame_id, u16 fragment_index,
+                             u16 fragment_count);  // fwd decl, defined below AppendU32LE
+
+// Splits `message` (a complete MSG_TYPE_VIDEO_FRAME/MSG_TYPE_AUDIO body)
+// across fragment_count datagrams, each prefixed with a 9-byte fragment
+// header (AppendUdpFragmentHeader above) -- docs/protocol.md's "Dedicated
+// video/audio channel (UDP)", same framing Cemu's own SendFragmented
+// (WiiuGamepadStream.cpp) uses.
+bool SendFragmentedUdp(sf::UdpSocket& socket, const sf::IpAddress& dest_address,
+                       unsigned short dest_port, const std::vector<u8>& message, u8 msg_type,
+                       u32 frame_id)
+{
+  const size_t fragment_count =
+      message.empty() ? 1 : (message.size() + UDP_MAX_FRAGMENT_PAYLOAD - 1) / UDP_MAX_FRAGMENT_PAYLOAD;
+  for (size_t i = 0; i < fragment_count; ++i)
+  {
+    const size_t offset = i * UDP_MAX_FRAGMENT_PAYLOAD;
+    const size_t chunk_len = std::min(UDP_MAX_FRAGMENT_PAYLOAD, message.size() - offset);
+
+    std::vector<u8> datagram;
+    datagram.reserve(UDP_FRAGMENT_HEADER_SIZE + chunk_len);
+    AppendUdpFragmentHeader(&datagram, msg_type, frame_id, static_cast<u16>(i),
+                            static_cast<u16>(fragment_count));
+    if (chunk_len > 0)
+      datagram.insert(datagram.end(), message.begin() + static_cast<ptrdiff_t>(offset),
+                      message.begin() + static_cast<ptrdiff_t>(offset + chunk_len));
+
+    if (socket.send(datagram.data(), datagram.size(), dest_address, dest_port) !=
+        sf::Socket::Status::Done)
+      return false;
+  }
+  return true;
+}
 
 // Video frame sub-format, sent as one extra byte right after width/height
 // (see SendVideoFrameIfPending). Two independent bits:
@@ -124,6 +185,15 @@ void AppendU32LE(std::vector<u8>* out, u32 value)
   out->push_back(static_cast<u8>((value >> 8) & 0xFF));
   out->push_back(static_cast<u8>((value >> 16) & 0xFF));
   out->push_back(static_cast<u8>((value >> 24) & 0xFF));
+}
+
+void AppendUdpFragmentHeader(std::vector<u8>* out, u8 msg_type, u32 frame_id, u16 fragment_index,
+                             u16 fragment_count)
+{
+  out->push_back(msg_type);
+  AppendU32LE(out, frame_id);
+  AppendU16LE(out, fragment_index);
+  AppendU16LE(out, fragment_count);
 }
 
 struct EncodedPixels
@@ -340,6 +410,20 @@ GBAStreamHost::GBAStreamHost(int device_number) : m_device_number(device_number)
     ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamHost: failed to listen on port {}", port);
     return;
   }
+
+  // Dedicated video/audio channel (docs/protocol.md, "Dedicated
+  // video/audio channel (UDP)", protocol_version 4) -- bound here, once,
+  // same lifetime as m_listener above, not allocated per-session.
+  const auto video_port = static_cast<unsigned short>(port + kVideoPortOffset);
+  m_video_socket.setBlocking(false);
+  if (m_video_socket.bind(video_port) != sf::Socket::Status::Done)
+  {
+    ERROR_LOG_FMT(SERIALINTERFACE, "GBAStreamHost: failed to bind video socket on port {}",
+                  video_port);
+    m_listener.close();
+    return;
+  }
+
   NOTICE_LOG_FMT(SERIALINTERFACE, "GBAStreamHost: serving GBA {} on ws://<host>:{}/",
                  device_number + 1, port);
   m_accept_thread = std::thread([this] { AcceptLoop(); });
@@ -359,6 +443,7 @@ GBAStreamHost::~GBAStreamHost()
 
   m_stop = true;
   m_listener.close();
+  m_video_socket.unbind();
   if (m_accept_thread.joinable())
     m_accept_thread.join();
   DetachInputOverride();
@@ -445,8 +530,20 @@ void GBAStreamHost::ServeConnection(sf::TcpSocket& socket)
   if (!PerformAppHandshake(socket))
     return;
 
+  // Rendezvous (docs/protocol.md, "Dedicated video/audio channel (UDP)")
+  // -- the client is expected to send its hello datagram to video_port
+  // right after receiving session_ready above; wait for it here, bounded,
+  // before ever entering RunWebSocketSession(), so that function never has
+  // to handle "no client address yet" itself. A timeout here means a
+  // genuine connectivity problem, treated as a handshake failure the same
+  // as any other.
+  sf::IpAddress video_address = sf::IpAddress::Any;
+  unsigned short video_port = 0;
+  if (!WaitForVideoHello(std::chrono::seconds(5), &video_address, &video_port))
+    return;
+
   AttachInputOverride();
-  RunWebSocketSession(socket);
+  RunWebSocketSession(socket, video_address, video_port);
   DetachInputOverride();
 }
 
@@ -617,10 +714,11 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
   const std::string video_mode =
       (ack->video_mode == "h264" || ack->video_mode == "h265") ? ack->video_mode : "tiles";
 
+  const auto video_port = static_cast<u16>(GBA_STREAM_PLAYER_BASE_PORT + m_device_number + kVideoPortOffset);
   if (!SendWebSocketTextFrame(
           socket, BuildSessionReadyMessage(m_device_number, negotiated_video, negotiated_audio,
                                            std::nullopt /* redirect: this is the terminal port */,
-                                           video_mode),
+                                           video_mode, video_port),
           m_stop))
   {
     return false;
@@ -636,7 +734,44 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
   return true;
 }
 
-void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
+bool GBAStreamHost::WaitForVideoHello(std::chrono::milliseconds timeout, sf::IpAddress* out_address,
+                                      unsigned short* out_port)
+{
+  std::array<u8, UDP_FRAGMENT_HEADER_SIZE> buf{};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline)
+  {
+    if (m_stop)
+      return false;
+
+    std::optional<sf::IpAddress> sender_address;
+    unsigned short sender_port = 0;
+    std::size_t received = 0;
+    const auto status =
+        m_video_socket.receive(buf.data(), buf.size(), received, sender_address, sender_port);
+    if (status == sf::Socket::Status::Done)
+    {
+      if (received >= UDP_FRAGMENT_HEADER_SIZE && buf[0] == MSG_TYPE_UDP_HELLO && sender_address)
+      {
+        *out_address = *sender_address;
+        *out_port = sender_port;
+        return true;
+      }
+      // Anything else on this port (a stray/malformed packet, or a second
+      // hello from a different sender racing this one) is simply ignored
+      // -- keep waiting for a valid one until the deadline, rather than
+      // failing the whole handshake over it.
+      continue;
+    }
+    if (status != sf::Socket::Status::NotReady)
+      return false;  // Socket closed (destructor) or errored.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return false;  // Timed out.
+}
+
+void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket, const sf::IpAddress& video_address,
+                                        unsigned short video_port)
 {
   sf::SocketSelector selector;
   selector.add(socket);
@@ -670,8 +805,15 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
   // below -- previously both were serialized on one thread, so a slow frame
   // send doubled as input lag. Poll cadence matches the original combined
   // loop's 4ms.
-  std::thread writer_thread([this, &socket, &send_mutex, &session_stop] {
+  std::thread writer_thread([this, &video_address, video_port, &session_stop] {
     u64 last_sent_frame_id = 0;
+    // Fragment header frame_id (docs/protocol.md's own, distinct concept
+    // from last_sent_frame_id, which just detects "is there a new
+    // captured frame to send at all") -- counts video/audio *messages
+    // actually sent* this session, independently per type, same reasoning
+    // as Cemu's videoFrameIdCounter.
+    u32 video_frame_id_counter = 0;
+    u32 audio_frame_id_counter = 0;
     std::vector<u8> previous_rgb565;
     // Session-local, not a member -- same reasoning as previous_rgb565
     // above: encoder reference-frame state must never cross sessions. Left
@@ -682,9 +824,13 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
     while (!m_stop && !session_stop)
     {
       {
-        std::lock_guard<std::mutex> lock(send_mutex);
-        SendVideoFrameIfPending(socket, &last_sent_frame_id, &previous_rgb565, &video_encoder);
-        SendAudioIfPending(socket);
+        // Video/Audio now go out over m_video_socket (UDP, its own
+        // datagram socket, no shared mutable state with the TCP `socket`
+        // send_mutex below guards) -- no longer needs that lock at all,
+        // unlike before this channel existed.
+        SendVideoFrameIfPending(video_address, video_port, &video_frame_id_counter,
+                                &last_sent_frame_id, &previous_rgb565, &video_encoder);
+        SendAudioIfPending(video_address, video_port, &audio_frame_id_counter);
       }
       if (m_stop || session_stop)
         break;
@@ -751,7 +897,9 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket)
   m_remote_keys = 0;
 }
 
-void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
+void GBAStreamHost::SendVideoFrameIfPending(const sf::IpAddress& video_address,
+                                            unsigned short video_port,
+                                            u32* video_frame_id_counter, u64* last_sent_frame_id,
                                             std::vector<u8>* previous_rgb565,
                                             std::unique_ptr<SoftwareVideoEncoder>* video_encoder)
 {
@@ -842,7 +990,8 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
         AppendU32LE(&message, (*video_encoder)->CodedHeight());
         message.push_back(m_video_mode == "h264" ? VIDEO_FORMAT_H264 : VIDEO_FORMAT_H265);
         message.insert(message.end(), nals.begin(), nals.end());
-        if (SendWebSocketBinaryFrame(socket, message, m_stop))
+        if (SendFragmentedUdp(m_video_socket, video_address, video_port, message,
+                              MSG_TYPE_VIDEO_FRAME, (*video_frame_id_counter)++))
           m_last_video_send_time = std::chrono::steady_clock::now();
       }
       // Whether or not this call produced output (encoder look-ahead
@@ -986,14 +1135,16 @@ void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sen
   message.push_back(format);
   message.insert(message.end(), compressed.begin(), compressed.end());
 
-  if (SendWebSocketBinaryFrame(socket, message, m_stop))
+  if (SendFragmentedUdp(m_video_socket, video_address, video_port, message, MSG_TYPE_VIDEO_FRAME,
+                        (*video_frame_id_counter)++))
   {
     *previous_rgb565 = std::move(rgb565);
     m_last_video_send_time = std::chrono::steady_clock::now();
   }
 }
 
-void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& socket)
+void GBAStreamHost::SendAudioIfPending(const sf::IpAddress& video_address, unsigned short video_port,
+                                       u32* audio_frame_id_counter)
 {
   std::vector<s16> samples;
   u32 channels;
@@ -1042,7 +1193,8 @@ void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& socket)
     message.push_back(static_cast<u8>(sample & 0xFF));
     message.push_back(static_cast<u8>((sample >> 8) & 0xFF));
   }
-  SendWebSocketBinaryFrame(socket, message, m_stop);
+  SendFragmentedUdp(m_video_socket, video_address, video_port, message, MSG_TYPE_AUDIO,
+                    (*audio_frame_id_counter)++);
 }
 
 void GBAStreamHost::AudioRateChanged(u32 sample_rate)

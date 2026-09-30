@@ -140,7 +140,8 @@ std::optional<HandshakeAck> ParseHelloAck(const std::vector<u8>& payload)
 std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
                                       const std::optional<NegotiatedAudio>& audio,
                                       const std::optional<HandshakeRedirect>& redirect,
-                                      const std::string& video_mode)
+                                      const std::string& video_mode,
+                                      std::optional<u16> video_port)
 {
   picojson::object obj;
   obj.emplace("message", picojson::value("session_ready"));
@@ -158,6 +159,12 @@ std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
     obj.emplace("redirect", redirect_obj);
   }
   obj.emplace("video_mode", picojson::value(video_mode));
+  // Dedicated video/audio channel (docs/protocol.md, "Dedicated
+  // video/audio channel (UDP)", protocol_version 4) -- presence of this
+  // key alone is what makes a client's unison_parse_session_ready() set
+  // has_video_port, no separate boolean field on the wire.
+  if (video_port)
+    obj.emplace("video_port", static_cast<double>(*video_port));
   return picojson::value(obj).serialize();
 }
 

@@ -39,7 +39,14 @@ constexpr unsigned short GBA_STREAM_PLAYER_BASE_PORT = 6801;
 // handshake/beacon messages built in GBAStreamHandshake.h). Exact-match only
 // -- no major/minor scheme. Bump this whenever a change here would require a
 // client-visible change to that document.
-constexpr int GBA_STREAM_PROTOCOL_VERSION = 2;
+//
+// 2 -> 4: session_ready.video_port now names a dedicated UDP channel
+// carrying Video and Audio (GBAStreamHost.cpp's m_video_socket), instead
+// of both staying multiplexed on the TCP connection alongside Input. See
+// docs/protocol.md's "Dedicated video/audio channel (UDP)". Skips the
+// intermediate protocol_version 3 (a second, still-TCP video connection)
+// entirely -- that step was superseded before this fork ever adopted it.
+constexpr int GBA_STREAM_PROTOCOL_VERSION = 4;
 
 // UDP broadcast port for the discovery beacon (GBAStreamBeacon.h) -- separate
 // from the TCP ports above so a stray beacon datagram can never be mistaken

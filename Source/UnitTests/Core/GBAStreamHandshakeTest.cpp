@@ -149,13 +149,17 @@ TEST(GBAStreamHandshake, BuildSessionReadyMessageVideoMode)
   // value, not hardcoded past this function's own boundary.
   for (const std::string mode : {"tiles", "legacy", "h264", "h265"})
   {
-    const auto obj = ParseObject(
-        BuildSessionReadyMessage(0, NegotiatedVideo{240, 160, 59.7275}, std::nullopt, std::nullopt, mode));
+    const auto obj = ParseObject(BuildSessionReadyMessage(
+        0, NegotiatedVideo{240, 160, 59.7275}, std::nullopt, std::nullopt, mode, 6851));
     EXPECT_EQ(obj.at("message").to_str(), "session_ready");
     EXPECT_EQ(obj.at("video_mode").to_str(), mode);
     EXPECT_EQ(obj.at("video").get<picojson::object>().at("width").get<double>(), 240.0);
     EXPECT_EQ(obj.count("audio"), 0u);
     EXPECT_EQ(obj.count("redirect"), 0u);
+    // Dedicated video/audio channel (docs/protocol.md, "Dedicated
+    // video/audio channel (UDP)", protocol_version 4).
+    ASSERT_EQ(obj.count("video_port"), 1u);
+    EXPECT_EQ(obj.at("video_port").get<double>(), 6851.0);
   }
 }
 
@@ -163,7 +167,7 @@ TEST(GBAStreamHandshake, BuildSessionReadyMessageWithAudioAndRedirect)
 {
   const auto obj = ParseObject(BuildSessionReadyMessage(
       2, NegotiatedVideo{240, 160, 59.7275}, NegotiatedAudio{32768, 1},
-      HandshakeRedirect{"192.168.1.42", 6803}, "tiles"));
+      HandshakeRedirect{"192.168.1.42", 6803}, "tiles", 6853));
   EXPECT_EQ(obj.at("slot").get<double>(), 2.0);
   ASSERT_EQ(obj.count("audio"), 1u);
   EXPECT_EQ(obj.at("audio").get<picojson::object>().at("channels").get<double>(), 1.0);
@@ -171,6 +175,19 @@ TEST(GBAStreamHandshake, BuildSessionReadyMessageWithAudioAndRedirect)
   const auto& redirect_obj = obj.at("redirect").get<picojson::object>();
   EXPECT_EQ(redirect_obj.at("host").to_str(), "192.168.1.42");
   EXPECT_EQ(redirect_obj.at("port").get<double>(), 6803.0);
+  ASSERT_EQ(obj.count("video_port"), 1u);
+  EXPECT_EQ(obj.at("video_port").get<double>(), 6853.0);
+}
+
+TEST(GBAStreamHandshake, BuildSessionReadyMessageOmitsVideoPortWhenNullopt)
+{
+  // GBAStreamLobby.cpp's own redirect-hop placeholder reply -- this
+  // connection never streams anything, so it passes nullopt (see that
+  // call site's own comment).
+  const auto obj = ParseObject(
+      BuildSessionReadyMessage(0, NegotiatedVideo{240, 160, 59.7275}, std::nullopt,
+                               HandshakeRedirect{"192.168.1.42", 6803}, "tiles", std::nullopt));
+  EXPECT_EQ(obj.count("video_port"), 0u);
 }
 
 TEST(GBAStreamHandshake, BuildHandshakeErrorMessage)

@@ -132,10 +132,17 @@ std::optional<HandshakeAck> ParseHelloAck(const std::vector<u8>& payload);
 // video_mode's own comment for how that decision is made). Either way this
 // function itself doesn't decide anything, it only reports what the caller
 // already chose.
+// video_port: the dedicated UDP video/audio channel's port (docs/
+// protocol.md, "Dedicated video/audio channel (UDP)", protocol_version 4)
+// -- nullopt only for GBAStreamLobby's own redirect-hop placeholder reply
+// (that connection never streams anything, the client reconnects to the
+// real player port and gets a second, real session_ready with this set),
+// always set for a real GBAStreamHost session.
 std::string BuildSessionReadyMessage(int slot, const NegotiatedVideo& video,
                                       const std::optional<NegotiatedAudio>& audio,
                                       const std::optional<HandshakeRedirect>& redirect,
-                                      const std::string& video_mode);
+                                      const std::string& video_mode,
+                                      std::optional<u16> video_port);
 
 std::string BuildHandshakeErrorMessage(HandshakeErrorCode code, const std::string& detail);
 

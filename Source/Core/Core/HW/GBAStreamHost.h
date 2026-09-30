@@ -15,8 +15,10 @@
 #include <thread>
 #include <vector>
 
+#include <SFML/Network/IpAddress.hpp>
 #include <SFML/Network/TcpListener.hpp>
 #include <SFML/Network/TcpSocket.hpp>
+#include <SFML/Network/UdpSocket.hpp>
 
 #include "Common/CommonTypes.h"
 #include "Core/HW/GBAStreamHandshake.h"
@@ -102,11 +104,23 @@ private:
   // SendVideoFrameIfPending/SendAudioIfPending) before returning true; the
   // caller (ServeConnection) only proceeds to RunWebSocketSession on true.
   bool PerformAppHandshake(sf::TcpSocket& socket);
-  void RunWebSocketSession(sf::TcpSocket& socket);
-  void SendVideoFrameIfPending(sf::TcpSocket& socket, u64* last_sent_frame_id,
+  // Waits (bounded) on m_video_socket for the client's rendezvous datagram
+  // (MSG_TYPE_UDP_HELLO, docs/protocol.md's "Dedicated video/audio channel
+  // (UDP)") -- called from ServeConnection() right after session_ready
+  // (with video_port) goes out, so RunWebSocketSession() always starts
+  // already knowing where to send Video/Audio rather than having to handle
+  // "no client address yet" itself. Returns false on timeout/error;
+  // *out_address/*out_port are only meaningful when this returns true.
+  bool WaitForVideoHello(std::chrono::milliseconds timeout, sf::IpAddress* out_address,
+                         unsigned short* out_port);
+  void RunWebSocketSession(sf::TcpSocket& socket, const sf::IpAddress& video_address,
+                          unsigned short video_port);
+  void SendVideoFrameIfPending(const sf::IpAddress& video_address, unsigned short video_port,
+                               u32* video_frame_id_counter, u64* last_sent_frame_id,
                                std::vector<u8>* previous_rgb565,
                                std::unique_ptr<SoftwareVideoEncoder>* video_encoder);
-  void SendAudioIfPending(sf::TcpSocket& socket);
+  void SendAudioIfPending(const sf::IpAddress& video_address, unsigned short video_port,
+                          u32* audio_frame_id_counter);
 
   void AttachInputOverride();
   void DetachInputOverride();
@@ -124,6 +138,17 @@ private:
   sf::TcpListener m_listener;
   std::thread m_accept_thread;
   std::atomic_bool m_stop{false};
+
+  // Dedicated video/audio channel (docs/protocol.md, "Dedicated
+  // video/audio channel (UDP)", protocol_version 4) -- a second,
+  // always-bound UDP socket alongside m_listener above, port =
+  // (GBA_STREAM_PLAYER_BASE_PORT + m_device_number) + kVideoPortOffset.
+  // Bound in the constructor the same way m_listener is, so it's ready
+  // before any client ever connects, not allocated per-session. UDP, so
+  // no listen()/accept() -- datagrams just arrive once bound. Same offset
+  // convention as Cemu's WiiuGamepadStream::kVideoPortOffset.
+  static constexpr unsigned short kVideoPortOffset = 50;
+  sf::UdpSocket m_video_socket;
 
   // One entry per connection ServeConnection() is currently handling (or has
   // handled -- see AcceptLoop()'s comment on why these aren't reaped mid-
