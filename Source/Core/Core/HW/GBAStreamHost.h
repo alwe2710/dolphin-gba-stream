@@ -115,11 +115,18 @@ private:
                          unsigned short* out_port);
   void RunWebSocketSession(sf::TcpSocket& socket, const sf::IpAddress& video_address,
                           unsigned short video_port);
-  void SendVideoFrameIfPending(const sf::IpAddress& video_address, unsigned short video_port,
+  // tcp_socket/send_mutex are only used (and send_mutex only locked) when
+  // m_tcp_video_fallback is true -- see SendVideoOrAudioMessage's own
+  // comment (GBAStreamHost.cpp). tcp_socket is the same control connection
+  // RunWebSocketSession's own inline pong replies use; send_mutex is that
+  // function's send_mutex, guarding both against interleaving on the wire.
+  void SendVideoFrameIfPending(sf::TcpSocket& tcp_socket, std::mutex& send_mutex,
+                               const sf::IpAddress& video_address, unsigned short video_port,
                                u32* video_frame_id_counter, u64* last_sent_frame_id,
                                std::vector<u8>* previous_rgb565,
                                std::unique_ptr<SoftwareVideoEncoder>* video_encoder);
-  void SendAudioIfPending(const sf::IpAddress& video_address, unsigned short video_port,
+  void SendAudioIfPending(sf::TcpSocket& tcp_socket, std::mutex& send_mutex,
+                          const sf::IpAddress& video_address, unsigned short video_port,
                           u32* audio_frame_id_counter);
 
   void AttachInputOverride();
@@ -205,6 +212,12 @@ private:
   std::string m_video_mode = "tiles";
   bool m_audio_enabled = true;
   u8 m_negotiated_audio_channels = 2;
+  // Set alongside the other m_negotiated_*/m_video_mode fields above, from
+  // hello_ack.no_udp_video (docs/protocol.md, "Opting out") -- read by
+  // ServeConnection (to skip WaitForVideoHello and omit session_ready.
+  // video_port) and by SendVideoFrameIfPending/SendAudioIfPending (via
+  // SendVideoOrAudioMessage, to pick TCP over the dedicated UDP channel).
+  bool m_tcp_video_fallback = false;
   std::chrono::steady_clock::time_point m_last_video_send_time{};
 };
 

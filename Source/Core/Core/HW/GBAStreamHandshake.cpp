@@ -44,8 +44,6 @@ const char* ErrorCodeToString(HandshakeErrorCode code)
     return "slot_unavailable";
   case HandshakeErrorCode::MalformedRequest:
     return "malformed_request";
-  case HandshakeErrorCode::UdpVideoRequired:
-    return "udp_video_required";
   }
   return "malformed_request";
 }

@@ -119,12 +119,6 @@ enum class HandshakeErrorCode
   VersionMismatch,
   SlotUnavailable,
   MalformedRequest,
-  // Client set hello_ack.no_udp_video, but this server has no TCP
-  // fallback for Video/Audio left to offer instead (removed when this
-  // stream type moved to the dedicated UDP channel, protocol_version 4)
-  // -- see GBAStreamHost::PerformAppHandshake()'s own comment on this
-  // check.
-  UdpVideoRequired,
 };
 
 // Serializes a `hello` message body (the JSON text frame payload -- callers

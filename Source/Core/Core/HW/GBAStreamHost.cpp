@@ -123,6 +123,29 @@ bool SendFragmentedUdp(sf::UdpSocket& socket, const sf::IpAddress& dest_address,
   return true;
 }
 
+// Dispatches one already-built Video/Audio message body (SendVideoFrameIfPending/
+// SendAudioIfPending) to wherever this session actually wants it: the dedicated
+// UDP channel normally, or -- for a client that set hello_ack.no_udp_video (docs/
+// protocol.md, "Opting out"), which has no dedicated UDP destination at all --
+// tcp_socket instead, as an ordinary WebSocket binary frame on the same
+// connection that carries Input/ping, the same wire format this stream type
+// used before protocol_version 4. send_mutex is the same one RunWebSocketSession's
+// own inline pong replies use, so the two can never interleave bytes mid-frame
+// on tcp_socket; unused (and left unlocked) on the UDP path, which shares no
+// mutable state with the TCP socket at all.
+bool SendVideoOrAudioMessage(bool tcp_fallback, sf::TcpSocket& tcp_socket, std::mutex& send_mutex,
+                             const std::atomic_bool& stop, sf::UdpSocket& video_socket,
+                             const sf::IpAddress& video_address, unsigned short video_port,
+                             const std::vector<u8>& message, u8 msg_type, u32 frame_id)
+{
+  if (tcp_fallback)
+  {
+    std::lock_guard<std::mutex> lock(send_mutex);
+    return SendWebSocketBinaryFrame(tcp_socket, message, stop);
+  }
+  return SendFragmentedUdp(video_socket, video_address, video_port, message, msg_type, frame_id);
+}
+
 // Video frame sub-format, sent as one extra byte right after width/height
 // (see SendVideoFrameIfPending). Two independent bits:
 //  - VIDEO_FORMAT_INDEXED: pixels are a per-frame palette (<=256 entries)
@@ -536,10 +559,13 @@ void GBAStreamHost::ServeConnection(sf::TcpSocket& socket)
   // before ever entering RunWebSocketSession(), so that function never has
   // to handle "no client address yet" itself. A timeout here means a
   // genuine connectivity problem, treated as a handshake failure the same
-  // as any other.
+  // as any other. Skipped entirely for a client that set hello_ack.
+  // no_udp_video (m_tcp_video_fallback) -- there's no dedicated UDP
+  // destination to learn; video_address/video_port stay at their unused
+  // defaults, which RunWebSocketSession never looks at in that case.
   sf::IpAddress video_address = sf::IpAddress::Any;
   unsigned short video_port = 0;
-  if (!WaitForVideoHello(std::chrono::seconds(5), &video_address, &video_port))
+  if (!m_tcp_video_fallback && !WaitForVideoHello(std::chrono::seconds(5), &video_address, &video_port))
     return;
 
   AttachInputOverride();
@@ -696,22 +722,16 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
     return false;
   }
   // Opt-out from the dedicated UDP channel (docs/protocol.md, "Dedicated
-  // video/audio channel (UDP)") -- clients/web is the one real client
-  // that ever sets this (no raw socket API in a browser at all). This
-  // stream type has no TCP fallback left to offer such a client instead
-  // -- so a client that can't use UDP genuinely cannot stream
-  // GC_GBA_LINK video/audio at all right now; reject clearly rather than
-  // connect it to a session that will never show a frame.
-  if (ack->no_udp_video)
-  {
-    SendWebSocketTextFrame(
-        socket,
-        BuildHandshakeErrorMessage(HandshakeErrorCode::UdpVideoRequired,
-                                   "Dieser Client kann keine UDP-Verbindung aufbauen, GC_GBA_LINK "
-                                   "bietet aber keinen TCP-Fallback mehr an"),
-        m_stop);
-    return false;
-  }
+  // video/audio channel (UDP)" -> "Opting out") -- clients/web is the one
+  // real client that ever sets this (no raw socket API in a browser at
+  // all). Video/Audio then stay multiplexed on this same WebSocket
+  // connection instead, the same wire format this stream type used before
+  // protocol_version 4 -- session_ready omits video_port entirely below
+  // and WaitForVideoHello is skipped (ServeConnection), since there's no
+  // dedicated UDP destination to learn. Read by SendVideoFrameIfPending/
+  // SendAudioIfPending (via SendVideoOrAudioMessage) for the rest of this
+  // session.
+  m_tcp_video_fallback = ack->no_udp_video;
 
   const NegotiatedVideo negotiated_video =
       NegotiateVideo(GBA_NATIVE_WIDTH, GBA_NATIVE_HEIGHT, GBA_NATIVE_FPS, ack->video_limits);
@@ -731,7 +751,10 @@ bool GBAStreamHost::PerformAppHandshake(sf::TcpSocket& socket)
   const std::string video_mode =
       (ack->video_mode == "h264" || ack->video_mode == "h265") ? ack->video_mode : "tiles";
 
-  const auto video_port = static_cast<u16>(GBA_STREAM_PLAYER_BASE_PORT + m_device_number + kVideoPortOffset);
+  const std::optional<u16> video_port =
+      m_tcp_video_fallback ?
+          std::nullopt :
+          std::optional<u16>(static_cast<u16>(GBA_STREAM_PLAYER_BASE_PORT + m_device_number + kVideoPortOffset));
   if (!SendWebSocketTextFrame(
           socket, BuildSessionReadyMessage(m_device_number, negotiated_video, negotiated_audio,
                                            std::nullopt /* redirect: this is the terminal port */,
@@ -822,7 +845,7 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket, const sf::IpAddre
   // below -- previously both were serialized on one thread, so a slow frame
   // send doubled as input lag. Poll cadence matches the original combined
   // loop's 4ms.
-  std::thread writer_thread([this, &video_address, video_port, &session_stop] {
+  std::thread writer_thread([this, &socket, &send_mutex, &video_address, video_port, &session_stop] {
     u64 last_sent_frame_id = 0;
     // Fragment header frame_id (docs/protocol.md's own, distinct concept
     // from last_sent_frame_id, which just detects "is there a new
@@ -841,13 +864,17 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket, const sf::IpAddre
     while (!m_stop && !session_stop)
     {
       {
-        // Video/Audio now go out over m_video_socket (UDP, its own
+        // Video/Audio normally go out over m_video_socket (UDP, its own
         // datagram socket, no shared mutable state with the TCP `socket`
-        // send_mutex below guards) -- no longer needs that lock at all,
-        // unlike before this channel existed.
-        SendVideoFrameIfPending(video_address, video_port, &video_frame_id_counter,
-                                &last_sent_frame_id, &previous_rgb565, &video_encoder);
-        SendAudioIfPending(video_address, video_port, &audio_frame_id_counter);
+        // send_mutex below guards) -- no lock needed for that path. A
+        // client that set hello_ack.no_udp_video (m_tcp_video_fallback)
+        // has no dedicated UDP destination at all though, so
+        // SendVideoOrAudioMessage sends on `socket` instead in that case,
+        // guarded by send_mutex the same as the inline pong replies below.
+        SendVideoFrameIfPending(socket, send_mutex, video_address, video_port,
+                                &video_frame_id_counter, &last_sent_frame_id, &previous_rgb565,
+                                &video_encoder);
+        SendAudioIfPending(socket, send_mutex, video_address, video_port, &audio_frame_id_counter);
       }
       if (m_stop || session_stop)
         break;
@@ -914,7 +941,8 @@ void GBAStreamHost::RunWebSocketSession(sf::TcpSocket& socket, const sf::IpAddre
   m_remote_keys = 0;
 }
 
-void GBAStreamHost::SendVideoFrameIfPending(const sf::IpAddress& video_address,
+void GBAStreamHost::SendVideoFrameIfPending(sf::TcpSocket& tcp_socket, std::mutex& send_mutex,
+                                            const sf::IpAddress& video_address,
                                             unsigned short video_port,
                                             u32* video_frame_id_counter, u64* last_sent_frame_id,
                                             std::vector<u8>* previous_rgb565,
@@ -1007,8 +1035,9 @@ void GBAStreamHost::SendVideoFrameIfPending(const sf::IpAddress& video_address,
         AppendU32LE(&message, (*video_encoder)->CodedHeight());
         message.push_back(m_video_mode == "h264" ? VIDEO_FORMAT_H264 : VIDEO_FORMAT_H265);
         message.insert(message.end(), nals.begin(), nals.end());
-        if (SendFragmentedUdp(m_video_socket, video_address, video_port, message,
-                              MSG_TYPE_VIDEO_FRAME, (*video_frame_id_counter)++))
+        if (SendVideoOrAudioMessage(m_tcp_video_fallback, tcp_socket, send_mutex, m_stop,
+                                    m_video_socket, video_address, video_port, message,
+                                    MSG_TYPE_VIDEO_FRAME, (*video_frame_id_counter)++))
           m_last_video_send_time = std::chrono::steady_clock::now();
       }
       // Whether or not this call produced output (encoder look-ahead
@@ -1152,15 +1181,17 @@ void GBAStreamHost::SendVideoFrameIfPending(const sf::IpAddress& video_address,
   message.push_back(format);
   message.insert(message.end(), compressed.begin(), compressed.end());
 
-  if (SendFragmentedUdp(m_video_socket, video_address, video_port, message, MSG_TYPE_VIDEO_FRAME,
-                        (*video_frame_id_counter)++))
+  if (SendVideoOrAudioMessage(m_tcp_video_fallback, tcp_socket, send_mutex, m_stop, m_video_socket,
+                              video_address, video_port, message, MSG_TYPE_VIDEO_FRAME,
+                              (*video_frame_id_counter)++))
   {
     *previous_rgb565 = std::move(rgb565);
     m_last_video_send_time = std::chrono::steady_clock::now();
   }
 }
 
-void GBAStreamHost::SendAudioIfPending(const sf::IpAddress& video_address, unsigned short video_port,
+void GBAStreamHost::SendAudioIfPending(sf::TcpSocket& tcp_socket, std::mutex& send_mutex,
+                                       const sf::IpAddress& video_address, unsigned short video_port,
                                        u32* audio_frame_id_counter)
 {
   std::vector<s16> samples;
@@ -1210,8 +1241,9 @@ void GBAStreamHost::SendAudioIfPending(const sf::IpAddress& video_address, unsig
     message.push_back(static_cast<u8>(sample & 0xFF));
     message.push_back(static_cast<u8>((sample >> 8) & 0xFF));
   }
-  SendFragmentedUdp(m_video_socket, video_address, video_port, message, MSG_TYPE_AUDIO,
-                    (*audio_frame_id_counter)++);
+  SendVideoOrAudioMessage(m_tcp_video_fallback, tcp_socket, send_mutex, m_stop, m_video_socket,
+                          video_address, video_port, message, MSG_TYPE_AUDIO,
+                          (*audio_frame_id_counter)++);
 }
 
 void GBAStreamHost::AudioRateChanged(u32 sample_rate)
